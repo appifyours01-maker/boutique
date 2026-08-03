@@ -1,6 +1,5 @@
 import 'screens/element_screen/delivery.dart';
 import 'chatbot.dart';
-import 'package:appifyours/services/api_service.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:flutter/widgets.dart';
 import 'package:carousel_slider/carousel_slider.dart';
@@ -374,6 +373,56 @@ class ApiService {
     }
   }
   
+  Future<bool> hasActiveSubscription() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString('auth_token');
+      if (token == null) return false;
+      
+      final response = await http.get(
+        Uri.parse('$baseUrl/api/subscription/status'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+      );
+      
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        return data['isActive'] ?? false;
+      }
+      return false;
+    } catch (e) {
+      print('Error checking subscription: $e');
+      return false;
+    }
+  }
+  
+  Future<Map<String, dynamic>> getBusinessDetails() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString('auth_token');
+      if (token == null) return {};
+      
+      final response = await http.get(
+        Uri.parse('$baseUrl/api/business/details'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+      );
+      
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        return data['data'] ?? {};
+      }
+      return {};
+    } catch (e) {
+      print('Error fetching business details: $e');
+      return {};
+    }
+  }
+  
   String get baseUrlValue => baseUrl;
 }
 
@@ -481,7 +530,7 @@ class MyApp extends StatelessWidget {
         backgroundColor: Colors.blue,
         foregroundColor: Colors.white,
       ),
-      cardTheme: const CardThemeData(
+      cardTheme: const CardTheme(
         elevation: 4,
         shadowColor: Colors.black12,
         shape: RoundedRectangleBorder(
