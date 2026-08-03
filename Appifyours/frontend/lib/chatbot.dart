@@ -132,7 +132,8 @@ Please provide a helpful, concise response based on the above information. If th
       if (_products.isNotEmpty) {
         final inStock = _products.where((p) {
           final qty = p['quantity'] ?? 0;
-          return int.tryParse(qty.toString())?.isPositive ?? false;
+          // FIXED: Use > 0 instead of isPositive
+          return int.tryParse(qty.toString()) != null && int.tryParse(qty.toString())! > 0;
         });
         if (inStock.isNotEmpty) {
           return 'We have ${inStock.length} products in stock. Here are some: ${inStock.take(5).map((p) => p['productName'] ?? 'Product').join(', ')}... Would you like more details about any specific product?';
