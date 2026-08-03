@@ -1,5 +1,6 @@
 import 'screens/element_screen/delivery.dart';
 import 'chatbot.dart';
+import 'services/api_service.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:flutter/widgets.dart';
 import 'package:carousel_slider/carousel_slider.dart';
@@ -10,19 +11,21 @@ import 'package:http/http.dart' as http;
 import 'package:socket_io_client/socket_io_client.dart' as IO;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:image_picker/image_picker.dart';
-
+import 'package:frontend/utils/auth_helper.dart';
+import 'package:frontend/services/mobile_session.dart';
 // Define PriceUtils class
 class PriceUtils {
   static String formatPrice(double price, {String currency = '\$'}) {
-    return '$currency${price.toStringAsFixed(2)}';
+    return '$currency\${price.toStringAsFixed(2)}';
   }
-  
+  // Extract numeric value from price string with any currency symbol
   static double parsePrice(String priceString) {
     if (priceString.isEmpty) return 0.0;
-    String numericString = priceString.replaceAll(RegExp(r'[^0-9.]'), '');
+    // Remove all currency symbols and non-numeric characters except decimal point
+    String numericString = priceString.replaceAll(RegExp(r'[^d.]'), '');
     return double.tryParse(numericString) ?? 0.0;
   }
-  
+  // Detect currency symbol from price string
   static String detectCurrency(String priceString) {
     if (priceString.contains('₹')) return '₹';
     if (priceString.contains('\$')) return '\$';
@@ -33,9 +36,8 @@ class PriceUtils {
     if (priceString.contains('₽')) return '₽';
     if (priceString.contains('₦')) return '₦';
     if (priceString.contains('₨')) return '₨';
-    return '\$';
+    return '\$'; // Default to dollar
   }
-  
   static String currencySymbolFromCode(String code) {
     switch (code.toUpperCase()) {
       case 'USD':
@@ -59,115 +61,22 @@ class PriceUtils {
       case 'PKR':
         return '₨';
       default:
-        return '\$';
+        return '\$'; // Default to dollar
     }
   }
-  
   static double calculateDiscountPrice(double originalPrice, double discountPercentage) {
     return originalPrice * (1 - discountPercentage / 100);
   }
-  
   static double calculateTotal(List<double> prices) {
     return prices.fold(0.0, (sum, price) => sum + price);
   }
-  
   static double calculateTax(double subtotal, double taxRate) {
     return subtotal * (taxRate / 100);
   }
-  
   static double applyShipping(double total, double shippingFee, {double freeShippingThreshold = 100.0}) {
     return total >= freeShippingThreshold ? total : total + shippingFee;
   }
 }
-
-// Cart Manager
-class CartManager extends ChangeNotifier {
-  final List<CartItem> _items = [];
-  
-  CartManager() {
-    _loadCart();
-  }
-  
-  Future<void> _loadCart() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final userId = prefs.getString('user_id');
-      final cartKey = userId != null ? 'cart_items_${userId}' : 'cart_items';
-      final String? raw = prefs.getString(cartKey);
-      if (raw != null && raw.isNotEmpty) {
-        final List<dynamic> decoded = jsonDecode(raw);
-        _items.clear();
-        _items.addAll(decoded.map((e) => CartItem.fromJson(e as Map<String, dynamic>)));
-        notifyListeners();
-      }
-    } catch (e) {
-      print('Error loading cart: $e');
-    }
-  }
-  
-  Future<void> _saveCart() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final encoded = jsonEncode(_items.map((e) => e.toJson()).toList());
-      final userId = prefs.getString('user_id');
-      final cartKey = userId != null ? 'cart_items_${userId}' : 'cart_items';
-      await prefs.setString(cartKey, encoded);
-    } catch (e) {
-      print('Error saving cart: $e');
-    }
-  }
-  
-  List<CartItem> get items => List.unmodifiable(_items);
-  
-  int get totalQuantity => _items.fold(0, (sum, item) => sum + item.quantity);
-  
-  double get subtotal => _items.fold(0.0, (sum, item) => sum + item.totalPrice);
-  
-  double get totalDiscount => _items.fold(0.0, (sum, item) => sum + ((item.price - item.effectivePrice) * item.quantity));
-  
-  double get gstAmount => subtotal * 0.18;
-  
-  double get finalTotal => subtotal + gstAmount;
-  
-  String get displayCurrencySymbol => _items.isNotEmpty ? _items.first.currencySymbol : '\$';
-  
-  void addItem(CartItem item) {
-    final existingIndex = _items.indexWhere((i) => i.id == item.id);
-    if (existingIndex != -1) {
-      _items[existingIndex].quantity += 1;
-    } else {
-      _items.add(item);
-    }
-    _saveCart();
-    notifyListeners();
-  }
-  
-  void removeItem(String id) {
-    _items.removeWhere((item) => item.id == id);
-    _saveCart();
-    notifyListeners();
-  }
-  
-  void updateQuantity(String id, int newQuantity) {
-    final index = _items.indexWhere((item) => item.id == id);
-    if (index != -1) {
-      if (newQuantity <= 0) {
-        _items.removeAt(index);
-      } else {
-        _items[index].quantity = newQuantity;
-      }
-      _saveCart();
-      notifyListeners();
-    }
-  }
-  
-  void clear() {
-    _items.clear();
-    _saveCart();
-    notifyListeners();
-  }
-}
-
 // Cart item model
 class CartItem {
   final String id;
@@ -177,7 +86,6 @@ class CartItem {
   int quantity;
   final String? image;
   final String currencySymbol;
-  
   CartItem({
     required this.id,
     required this.name,
@@ -185,12 +93,10 @@ class CartItem {
     this.discountPrice = 0.0,
     this.quantity = 1,
     this.image,
-    this.currencySymbol = '\$',
+    this.currencySymbol = '\\\$',
   });
-  
   double get effectivePrice => discountPrice > 0 ? discountPrice : price;
   double get totalPrice => effectivePrice * quantity;
-  
   Map<String, dynamic> toJson() => {
     'id': id,
     'name': name,
@@ -200,7 +106,6 @@ class CartItem {
     'image': image,
     'currencySymbol': currencySymbol,
   };
-  
   factory CartItem.fromJson(Map<String, dynamic> json) => CartItem(
     id: json['id'].toString(),
     name: json['name'].toString(),
@@ -208,10 +113,9 @@ class CartItem {
     discountPrice: (json['discountPrice'] as num?)?.toDouble() ?? 0.0,
     quantity: (json['quantity'] as num?)?.toInt() ?? 1,
     image: json['image'] as String?,
-    currencySymbol: json['currencySymbol']?.toString() ?? '\$',
+    currencySymbol: json['currencySymbol']?.toString() ?? '',
   );
 }
-
 // Wishlist item model
 class WishlistItem {
   final String id;
@@ -220,18 +124,15 @@ class WishlistItem {
   final double discountPrice;
   final String? image;
   final String currencySymbol;
-  
   WishlistItem({
     required this.id,
     required this.name,
     required this.price,
     this.discountPrice = 0.0,
     this.image,
-    this.currencySymbol = '\$',
+    this.currencySymbol = '\\\$',
   });
-  
   double get effectivePrice => discountPrice > 0 ? discountPrice : price;
-  
   Map<String, dynamic> toJson() => {
     'id': id,
     'name': name,
@@ -240,30 +141,26 @@ class WishlistItem {
     'image': image,
     'currencySymbol': currencySymbol,
   };
-  
   factory WishlistItem.fromJson(Map<String, dynamic> json) => WishlistItem(
     id: json['id'].toString(),
     name: json['name'].toString(),
     price: (json['price'] as num).toDouble(),
     discountPrice: (json['discountPrice'] as num?)?.toDouble() ?? 0.0,
     image: json['image'] as String?,
-    currencySymbol: json['currencySymbol']?.toString() ?? '\$',
+    currencySymbol: json['currencySymbol']?.toString() ?? '',
   );
 }
-
 // Wishlist manager
 class WishlistManager extends ChangeNotifier {
   final List<WishlistItem> _items = [];
-  
   WishlistManager() {
     _loadWishlist();
   }
-  
   Future<void> _loadWishlist() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final userId = prefs.getString('user_id');
-      final wishKey = userId != null ? 'wishlist_items_${userId}' : 'wishlist_items';
+      final wishKey = userId != null ? 'wishlist_items_v1_${userId}' : 'wishlist_items_v1';
       final String? raw = prefs.getString(wishKey);
       if (raw != null && raw.isNotEmpty) {
         final List<dynamic> decoded = jsonDecode(raw);
@@ -272,24 +169,21 @@ class WishlistManager extends ChangeNotifier {
         notifyListeners();
       }
     } catch (e) {
-      print('Error loading wishlist: $e');
+      print('Error loading wishlist: 2.718281828459045');
     }
   }
-  
   Future<void> _saveWishlist() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final encoded = jsonEncode(_items.map((e) => e.toJson()).toList());
       final userId = prefs.getString('user_id');
-      final wishKey = userId != null ? 'wishlist_items_${userId}' : 'wishlist_items';
+      final wishKey = userId != null ? 'wishlist_items_v1_${userId}' : 'wishlist_items_v1';
       await prefs.setString(wishKey, encoded);
     } catch (e) {
-      print('Error saving wishlist: $e');
+      print('Error saving wishlist: 2.718281828459045');
     }
   }
-  
   List<WishlistItem> get items => List.unmodifiable(_items);
-  
   void addItem(WishlistItem item) {
     if (!_items.any((i) => i.id == item.id)) {
       _items.add(item);
@@ -297,156 +191,50 @@ class WishlistManager extends ChangeNotifier {
       notifyListeners();
     }
   }
-  
   void removeItem(String id) {
     _items.removeWhere((item) => item.id == id);
     _saveWishlist();
     notifyListeners();
   }
-  
   void clear() {
     _items.clear();
     _saveWishlist();
     notifyListeners();
   }
-  
+  // Aliases kept for call-site compatibility, if both names are used elsewhere
+  void clearWishlist() => clear();
+  void clearCart() => clear();
   bool isInWishlist(String id) {
     return _items.any((item) => item.id == id);
   }
 }
-
-// Auth Helper (replacement for package import)
-class AuthHelper {
-  static Future<bool> isAdmin() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final userId = prefs.getString('user_id');
-      final adminId = await AdminManager.getCurrentAdminId();
-      return userId == adminId;
-    } catch (e) {
-      return false;
-    }
-  }
-}
-
-// Mobile Session Manager (replacement for package import)
-class MobileSessionManager {
-  static MobileSessionManager? _instance;
-  static MobileSessionManager get instance {
-    _instance ??= MobileSessionManager._internal();
-    return _instance!;
-  }
-  
-  MobileSessionManager._internal();
-  
-  String? profileImage;
-  
-  static MobileSessionManager getInstance() => instance;
-}
-
-// API Service (replacement for package import)
-class ApiService {
-  static const String baseUrl = 'http://192.168.0.14:5000';
-  
-  Future<Map<String, dynamic>> getUserProfile() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('auth_token');
-      if (token == null) return {};
-      
-      final response = await http.get(
-        Uri.parse('$baseUrl/api/user/profile'),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-      );
-      
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        return data['data'] ?? {};
-      }
-      return {};
-    } catch (e) {
-      print('Error fetching user profile: $e');
-      return {};
-    }
-  }
-  
-  Future<bool> hasActiveSubscription() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('auth_token');
-      if (token == null) return false;
-      
-      final response = await http.get(
-        Uri.parse('$baseUrl/api/subscription/status'),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-      );
-      
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        return data['isActive'] ?? false;
-      }
-      return false;
-    } catch (e) {
-      print('Error checking subscription: $e');
-      return false;
-    }
-  }
-  
-  Future<Map<String, dynamic>> getBusinessDetails() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('auth_token');
-      if (token == null) return {};
-      
-      final response = await http.get(
-        Uri.parse('$baseUrl/api/business/details'),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-      );
-      
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        return data['data'] ?? {};
-      }
-      return {};
-    } catch (e) {
-      print('Error fetching business details: $e');
-      return {};
-    }
-  }
-  
-  String get baseUrlValue => baseUrl;
-}
-
-// Global variables for dynamic data
+// Dynamic Configuration from Form
+final String gstNumber = '$gstNumber';
+final String selectedCategory = '$selectedCategory';
+final Map<String, dynamic> storeInfo = {
+  'storeName': '${storeInfo['storeName'] ?? 'My Store'}',
+  'address': '${storeInfo['address'] ?? '123 Main St'}',
+  'email': '${storeInfo['email'] ?? 'support@example.com'}',
+  'phone': '${storeInfo['phone'] ?? '(123) 456-7890'}',
+};
+// Dynamic Product Data - Will be loaded from backend
 List<Map<String, dynamic>> productCards = [];
 bool isLoading = true;
 String? errorMessage;
+// Quantity tracking for products
 Map<String, int> _productQuantities = {};
-
 // WebSocket Real-time Sync Service
 class DynamicAppSync {
   static final DynamicAppSync _instance = DynamicAppSync._internal();
   factory DynamicAppSync() => _instance;
   DynamicAppSync._internal();
-  
   IO.Socket? _socket;
   final StreamController<Map<String, dynamic>> _updateController = 
       StreamController<Map<String, dynamic>>.broadcast();
   bool _isConnected = false;
   String? _adminId;
-  
   Stream<Map<String, dynamic>> get updates => _updateController.stream;
   bool get isConnected => _isConnected;
-  
   void connect({String? adminId, required String apiBase}) {
     if (_isConnected && _socket != null) return;
     _adminId = adminId;
@@ -465,7 +253,6 @@ class DynamicAppSync {
       print('DynamicAppSync: Error connecting: $e');
     }
   }
-  
   void _setupSocketListeners() {
     if (_socket == null) return;
     _socket!.onConnect((_) {
@@ -489,13 +276,11 @@ class DynamicAppSync {
       _handleUpdate({'type': 'home-page', 'data': data});
     });
   }
-  
   void _handleUpdate(Map<String, dynamic> update) {
     if (!_updateController.isClosed) {
       _updateController.add(update);
     }
   }
-  
   void disconnect() {
     if (_socket != null) {
       _socket!.disconnect();
@@ -503,7 +288,6 @@ class DynamicAppSync {
     }
     _isConnected = false;
   }
-  
   void dispose() {
     disconnect();
     if (!_updateController.isClosed) {
@@ -511,12 +295,91 @@ class DynamicAppSync {
     }
   }
 }
+// Function to load dynamic product data from backend
+Future<void> loadDynamicProductData() async {
+  try {
+    setState(() {
+      isLoading = true;
+      errorMessage = null;
+    });
+    // Get dynamic admin ID
+    final adminId = await AdminManager.getCurrentAdminId();
+    print('Ã°Å¸â€Â Loading dynamic data with admin ID: ${adminId}');
+    final response = await http.get(
+      Uri.parse('${dotenv.env['API_BASE'] ?? (throw Exception('API_BASE environment variable is not set. Please configure it in your .env file.'))}/api/get-form?adminId=${adminId}&appId=${ApiConfig.appId}'),
+      headers: {'Content-Type': 'application/json'},
+    );
+    if (response.statusCode == 200) {
+      final data = json.decode(response.body);
+      if (data['success'] == true && data['pages'] != null) {
+        final pages = data['pages'] as List;
+        final newProducts = <Map<String, dynamic>>[];
+        // Extract products from all widgets
+        for (var page in pages) {
+          if (page['widgets'] != null) {
+            for (var widget in page['widgets']) {
+              if (widget['properties'] != null && widget['properties']['productCards'] != null) {
+                final products = List<Map<String, dynamic>>.from(widget['properties']['productCards']);
+                newProducts.addAll(products);
+              }
+            }
+          }
+        }
+        setState(() {
+          productCards = newProducts;
+          isLoading = false;
+        });
+        print('Ã¢Å“â€¦ Loaded ${productCards.length} dynamic products');
+      } else {
+        throw Exception('Invalid response format');
+      }
+    } else {
+      throw Exception('HTTP ${response.statusCode}');
+    }
+  } catch (e) {
+    print('Ã¢ÂÅ’ Error loading dynamic data: $e');
+    setState(() {
+      errorMessage = e.toString();
+      isLoading = false;
+    });
+  }
+}
+// Real-time updates with WebSocket
+final DynamicAppSync _appSync = DynamicAppSync();
+StreamSubscription? _updateSubscription;
+void startRealTimeUpdates() async {
+  final adminId = await AdminManager.getCurrentAdminId();
+  if (adminId != null) {
+    _appSync.connect(adminId: adminId, apiBase: dotenv.env['API_BASE'] ?? (throw Exception('API_BASE environment variable is not set. Please configure it in your .env file.')));
+    _updateSubscription = _appSync.updates.listen((update) {
+      if (!mounted) return;
+      final type = update['type']?.toString().toLowerCase();
+      print('🔔 Received real-time update: $type');
+      switch (type) {
+        case 'home-page':
+        case 'dynamic-update':
+          loadDynamicProductData();
+          break;
+      }
+    });
+  }
+}
+@override
+void initState() {
+  super.initState();
+  loadDynamicProductData();
+  startRealTimeUpdates();
+}
+@override
+void dispose() {
+  _updateSubscription?.cancel();
+  _appSync.dispose();
+  super.dispose();
+}
 
 void main() => runApp(const MyApp());
-
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
-  
   @override
   Widget build(BuildContext context) => MaterialApp(
     title: 'Generated E-commerce App',
@@ -530,7 +393,7 @@ class MyApp extends StatelessWidget {
         backgroundColor: Colors.blue,
         foregroundColor: Colors.white,
       ),
-      cardTheme: const CardTheme(
+      cardTheme: const CardThemeData(
         elevation: 4,
         shadowColor: Colors.black12,
         shape: RoundedRectangleBorder(
@@ -558,47 +421,41 @@ class MyApp extends StatelessWidget {
     debugShowCheckedModeBanner: false,
   );
 }
-
-// API Configuration
+// API Configuration - Auto-updated with your server details
 class ApiConfig {
-  static const String baseUrl = 'http://192.168.0.14:5000';
-  static const String adminObjectId = '6a706bc19971af79ed7b7411';
-  static const String appId = 'APP_ID_HERE';
+  static String get baseUrl => dotenv.env['API_BASE'] ?? (throw Exception('API_BASE environment variable is not set. Please configure it in your .env file.'));
+  static const String adminObjectId = '6a706bc19971af79ed7b7411'; // Will be replaced during publish
+  static const String appId = 'APP_ID_HERE'; // Will be replaced during publish
 }
-
 class SessionManager {
   static const String adminUserId = ApiConfig.adminObjectId;
   static String? currentUserId;
   static String? authToken;
   static String? profileImage;
   static String appName = 'AppifyYours';
-  
   static Future<void> initFromAdminConfig({
     required String loadedAppName,
   }) async {
     appName = loadedAppName;
-    print('Admin config loaded: $loadedAppName');
-    print('App name set globally: ${SessionManager.appName}');
+    print('Ã°Å¸â€Â Admin config loaded: $loadedAppName');
+    print('Ã°Å¸Å½Â¨ App name set globally: ${SessionManager.appName}');
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('app_name', appName);
   }
-  
   static Future<void> bindAuth({
     required String userId,
     required String token,
-    String? profileImage,
   }) async {
     currentUserId = userId;
     authToken = token;
     SessionManager.profileImage = profileImage;
-    print('User logged in: $userId');
-    print('Session bound to userId: $userId');
+    print('Ã¢Å“â€¦ User logged in: $userId');
+    print('Ã°Å¸â€Â Session bound to userId: $userId');
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('auth_token', token);
     await prefs.setString('user_id', userId);
-    if (profileImage != null) await prefs.setString('profile_image', profileImage!);
+    if (profileImage != null) await prefs.setString('profile_image', profileImage);
   }
-  
   static Future<void> logout(BuildContext context) async {
     currentUserId = null;
     authToken = null;
@@ -615,46 +472,70 @@ class SessionManager {
     }
   }
 }
-
 // Dynamic Admin ID Detection
 class AdminManager {
   static String? _currentAdminId;
-  
   static Future<String> getCurrentAdminId() async {
     if (_currentAdminId != null) return _currentAdminId!;
+    // Immutable single source of truth: embedded at publish time
     final adminId = ApiConfig.adminObjectId;
+    assert(
+      adminId == ApiConfig.adminObjectId,
+      'Ã¢ÂÅ’ CRITICAL: Admin ID override detected',
+    );
     _currentAdminId = adminId;
-    print('Admin ID locked: $adminId');
+    print('Ã¢Å“â€¦ Admin ID locked: $adminId');
     return adminId;
   }
+  // Auto-detect admin ID from backend
+  static Future<String?> _autoDetectAdminId() async {
+    try {
+      final response = await http.get(
+        Uri.parse('https://appifyours.com/api/admin/app-info'),
+        headers: {'Content-Type': 'application/json'},
+      );
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        if (data['success'] == true && data['data'] != null) {
+          final appInfo = data['data'];
+          final adminId = appInfo['adminId'];
+          if (adminId != null && adminId.toString().isNotEmpty) {
+            return adminId.toString();
+          }
+        }
+      }
+    } catch (e) {
+      print('Auto-detection failed: $e');
+    }
+    return null;
+  }
+  // Method to set admin ID dynamically
+  static Future<void> setAdminId(String adminId) async {
+    throw UnsupportedError('Admin ID is immutable in generated apps');
+  }
 }
-
-// Splash Screen
+// Splash Screen - First screen
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
-  
   @override
   State<SplashScreen> createState() => _SplashScreenState();
 }
-
 class _SplashScreenState extends State<SplashScreen> {
   String _appName = 'Loading...';
-  
   @override
   void initState() {
     super.initState();
     _fetchAppNameAndNavigate();
   }
-  
   Future<void> _fetchAppNameAndNavigate() async {
     try {
+      // Get dynamic admin ID
       final adminId = await AdminManager.getCurrentAdminId();
-      print('Splash screen using admin ID: $adminId');
-      
+      print('Ã°Å¸â€Â Splash screen using admin ID: ${adminId}');
+      // Load admin splash config for this fixed adminId
       final response = await http.get(
-        Uri.parse('${ApiConfig.baseUrl}/api/admin/splash?adminId=$adminId&appId=${ApiConfig.appId}'),
+        Uri.parse('${dotenv.env['API_BASE'] ?? ApiService().baseUrl}/api/admin/splash?adminId=${adminId}&appId=${ApiConfig.appId}'),
       );
-      
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
         if (mounted) {
@@ -663,10 +544,10 @@ class _SplashScreenState extends State<SplashScreen> {
           setState(() {
             _appName = SessionManager.appName;
           });
-          print('Splash screen loaded app name: $_appName');
+          print('Ã¢Å“â€¦ Splash screen loaded app name: ${_appName}');
         }
       } else {
-        print('Splash screen API error: ${response.statusCode}');
+        print('Ã¢Å¡Â Ã¯Â¸Â Splash screen API error: ${response.statusCode}');
         if (mounted) {
           setState(() {
             _appName = SessionManager.appName;
@@ -674,33 +555,32 @@ class _SplashScreenState extends State<SplashScreen> {
         }
       }
     } catch (e) {
-      print('Error fetching app name: $e');
+      print('Error fetching app name: ${e}');
+      // If admin ID not found, show default and let user configure
       if (mounted) {
         setState(() {
           _appName = SessionManager.appName;
         });
       }
     }
-    
     await Future.delayed(const Duration(seconds: 3));
     if (mounted) {
+      // Ã¢Å“â€¦ Check session EXACTLY like web app does Ã¢â‚¬â€ read SharedPreferences
       final prefs = await SharedPreferences.getInstance();
       final token = prefs.getString('auth_token');
       final userId = prefs.getString('user_id');
       final bool isLoggedIn = token != null && token.isNotEmpty && userId != null && userId.isNotEmpty;
-      
+      // Restore in-memory session so rest of app can read SessionManager.currentUserId
       if (isLoggedIn) {
         SessionManager.currentUserId = userId;
         SessionManager.authToken = token;
       }
-      
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(builder: (context) => isLoggedIn ? const HomePage() : const SignInPage()),
       );
     }
   }
-  
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -749,28 +629,23 @@ class _SplashScreenState extends State<SplashScreen> {
     );
   }
 }
-
 // Sign In Page
 class SignInPage extends StatefulWidget {
   const SignInPage({super.key});
-  
   @override
   State<SignInPage> createState() => _SignInPageState();
 }
-
 class _SignInPageState extends State<SignInPage> {
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
   bool _isLoading = false;
   bool _obscurePassword = true;
-  
   @override
   void dispose() {
     _emailController.dispose();
     _passwordController.dispose();
     super.dispose();
   }
-  
   Future<void> _signIn() async {
     if (_emailController.text.isEmpty || _passwordController.text.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -778,12 +653,11 @@ class _SignInPageState extends State<SignInPage> {
       );
       return;
     }
-    
     setState(() => _isLoading = true);
     try {
       final adminId = await AdminManager.getCurrentAdminId();
       final response = await http.post(
-        Uri.parse('${ApiConfig.baseUrl}/api/login'),
+        Uri.parse('https://appifyours.com/api/login'),
         headers: {'Content-Type': 'application/json'},
         body: json.encode({
           'email': _emailController.text.trim(),
@@ -792,7 +666,6 @@ class _SignInPageState extends State<SignInPage> {
           'appId': ApiConfig.appId,
         }),
       );
-      
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
         if (data['success'] == true) {
@@ -801,11 +674,9 @@ class _SignInPageState extends State<SignInPage> {
           final userId = (user is Map)
               ? (user['_id']?.toString() ?? user['id']?.toString())
               : null;
-          
           if (token != null && token.isNotEmpty && userId != null && userId.isNotEmpty) {
             await SessionManager.bindAuth(userId: userId, token: token);
           }
-          
           if (mounted) {
             setState(() => _isLoading = false);
             Navigator.pushReplacement(
@@ -825,14 +696,13 @@ class _SignInPageState extends State<SignInPage> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Sign in failed: ${e.toString().replaceAll('Exception: ', '')}'),
+            content: Text('Sign in failed: \${e.toString().replaceAll("Exception: ", "")}'),
             backgroundColor: Colors.red,
           ),
         );
       }
     }
   }
-  
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -926,15 +796,12 @@ class _SignInPageState extends State<SignInPage> {
     );
   }
 }
-
 // Create Account Page
 class CreateAccountPage extends StatefulWidget {
   const CreateAccountPage({super.key});
-  
   @override
   State<CreateAccountPage> createState() => _CreateAccountPageState();
 }
-
 class _CreateAccountPageState extends State<CreateAccountPage> {
   final _firstNameController = TextEditingController();
   final _lastNameController = TextEditingController();
@@ -943,7 +810,6 @@ class _CreateAccountPageState extends State<CreateAccountPage> {
   final _passwordController = TextEditingController();
   bool _isLoading = false;
   bool _obscurePassword = true;
-  
   @override
   void dispose() {
     _firstNameController.dispose();
@@ -953,59 +819,50 @@ class _CreateAccountPageState extends State<CreateAccountPage> {
     _passwordController.dispose();
     super.dispose();
   }
-  
   bool _validateEmail(String email) {
-    return RegExp(r'^[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,4}$').hasMatch(email);
+    return RegExp(r'^[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+.[a-zA-Z]{2,4}$').hasMatch(email);
   }
-  
   bool _validatePhone(String phone) {
     return RegExp(r'^[0-9]{10}$').hasMatch(phone);
   }
-  
   bool _validatePassword(String password) {
     return password.length >= 6;
   }
-  
   Future<void> _createAccount() async {
     final firstName = _firstNameController.text.trim();
     final lastName = _lastNameController.text.trim();
     final email = _emailController.text.trim();
     final phone = _phoneController.text.trim();
     final password = _passwordController.text;
-    
     if (firstName.isEmpty || lastName.isEmpty || email.isEmpty || phone.isEmpty || password.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Please fill all fields')),
       );
       return;
     }
-    
     if (!_validateEmail(email)) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Please enter a valid email')),
       );
       return;
     }
-    
     if (!_validatePhone(phone)) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Please enter a valid 10-digit phone number')),
       );
       return;
     }
-    
     if (!_validatePassword(password)) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Password must be at least 6 characters')),
       );
       return;
     }
-    
     setState(() => _isLoading = true);
     try {
       final adminId = await AdminManager.getCurrentAdminId();
       final response = await http.post(
-        Uri.parse('${ApiConfig.baseUrl}/api/signup'),
+        Uri.parse('${dotenv.env['API_BASE'] ?? (throw Exception('API_BASE environment variable is not set. Please configure it in your .env file.'))}/api/signup'),
         headers: {'Content-Type': 'application/json'},
         body: json.encode({
           'firstName': firstName,
@@ -1017,21 +874,17 @@ class _CreateAccountPageState extends State<CreateAccountPage> {
           'shopName': SessionManager.appName,
         }),
       );
-      
       final result = json.decode(response.body);
       setState(() => _isLoading = false);
-      
       if (result['success'] == true) {
         final token = result['token']?.toString();
         final user = result['user'];
         final userId = (user is Map)
             ? (user['_id']?.toString() ?? user['id']?.toString())
             : (result['data'] is Map ? (result['data']['userId']?.toString()) : null);
-        
         if (token != null && token.isNotEmpty && userId != null && userId.isNotEmpty) {
           await SessionManager.bindAuth(userId: userId, token: token);
         }
-        
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
@@ -1061,7 +914,6 @@ class _CreateAccountPageState extends State<CreateAccountPage> {
       }
     }
   }
-  
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -1092,94 +944,147 @@ class _CreateAccountPageState extends State<CreateAccountPage> {
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 32),
-            TextField(
-              controller: _firstNameController,
-              decoration: const InputDecoration(
-                labelText: 'First Name',
-                prefixIcon: Icon(Icons.person),
-              ),
-              textCapitalization: TextCapitalization.words,
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: _lastNameController,
-              decoration: const InputDecoration(
-                labelText: 'Last Name',
-                prefixIcon: Icon(Icons.person_outline),
-              ),
-              textCapitalization: TextCapitalization.words,
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: _phoneController,
-              decoration: const InputDecoration(
-                labelText: 'Phone Number',
-                prefixIcon: Icon(Icons.phone),
-                hintText: '10 digit number',
-              ),
-              keyboardType: TextInputType.phone,
-              maxLength: 10,
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: _emailController,
-              decoration: const InputDecoration(
-                labelText: 'Email ID',
-                prefixIcon: Icon(Icons.email),
-              ),
-              keyboardType: TextInputType.emailAddress,
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: _passwordController,
-              decoration: InputDecoration(
-                labelText: 'Password',
-                prefixIcon: const Icon(Icons.lock),
-                suffixIcon: IconButton(
-                  icon: Icon(_obscurePassword ? Icons.visibility_off : Icons.visibility),
-                  onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
+              TextField(
+                controller: _firstNameController,
+                decoration: const InputDecoration(
+                  labelText: 'First Name',
+                  prefixIcon: Icon(Icons.person),
                 ),
+                textCapitalization: TextCapitalization.words,
               ),
-              obscureText: _obscurePassword,
-            ),
-            const SizedBox(height: 24),
-            ElevatedButton(
-              onPressed: _isLoading ? null : _createAccount,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.blue,
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 16),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _lastNameController,
+                decoration: const InputDecoration(
+                  labelText: 'Last Name',
+                  prefixIcon: Icon(Icons.person_outline),
+                ),
+                textCapitalization: TextCapitalization.words,
               ),
-              child: _isLoading
-                  ? const SizedBox(
-                      height: 20,
-                      width: 20,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: Colors.white,
-                      ),
-                    )
-                  : const Text('Create Account', style: TextStyle(fontSize: 16)),
-            ),
-          ],
+              const SizedBox(height: 16),
+              TextField(
+                controller: _phoneController,
+                decoration: const InputDecoration(
+                  labelText: 'Phone Number',
+                  prefixIcon: Icon(Icons.phone),
+                  hintText: '10 digit number',
+                ),
+                keyboardType: TextInputType.phone,
+                maxLength: 10,
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _emailController,
+                decoration: const InputDecoration(
+                  labelText: 'Email ID',
+                  prefixIcon: Icon(Icons.email),
+                ),
+                keyboardType: TextInputType.emailAddress,
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _passwordController,
+                decoration: InputDecoration(
+                  labelText: 'Password',
+                  prefixIcon: const Icon(Icons.lock),
+                  suffixIcon: IconButton(
+                    icon: Icon(_obscurePassword ? Icons.visibility_off : Icons.visibility),
+                    onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
+                  ),
+                ),
+                obscureText: _obscurePassword,
+              ),
+              const SizedBox(height: 24),
+              ElevatedButton(
+                onPressed: _isLoading ? null : _createAccount,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.blue,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                ),
+                child: _isLoading
+                    ? const SizedBox(
+                        height: 20,
+                        width: 20,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Text('Create Account', style: TextStyle(fontSize: 16)),
+              ),
+            ],
+          ),
         ),
       ),
     );
   }
 }
-
-// Home Page
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
-  
   @override
   State<HomePage> createState() => _HomePageState();
 }
-
 class _HomePageState extends State<HomePage> {
   bool _isUploadingProfileImage = false;
   final ImagePicker _picker = ImagePicker();
-  
+  Future<void> _showImageOptions() async {
+    final XFile? image = await _picker.pickImage(
+      source: ImageSource.gallery,
+      maxWidth: 1024,
+      maxHeight: 1024,
+      imageQuality: 85,
+    );
+    if (image == null) return;
+    await _uploadProfileImage(image);
+  }
+  Future<void> _uploadProfileImage(XFile image) async {
+    setState(() {
+      _isUploadingProfileImage = true;
+    });
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString('auth_token');
+      if (token == null) {
+        setState(() {
+          _isUploadingProfileImage = false;
+        });
+        return;
+      }
+      final uri = Uri.parse(ApiConfig.baseUrl + '/api/user/profile/photo');
+      final request = http.MultipartRequest('POST', uri);
+      request.headers['Authorization'] = 'Bearer ' + token;
+      final bytes = await image.readAsBytes();
+      request.files.add(
+        http.MultipartFile.fromBytes('photo', bytes, filename: image.name),
+      );
+      final streamedResponse = await request.send();
+      final response = await http.Response.fromStream(streamedResponse);
+      if (response.statusCode == 200) {
+        try {
+          final Map<String, dynamic> responseJson = jsonDecode(response.body);
+          if (responseJson['success'] == true && responseJson['presignedUrl'] != null) {
+            final String newUrl = responseJson['presignedUrl'].toString();
+            MobileSessionManager().profileImage = newUrl;
+          }
+        } catch (e) {
+          print('Error parsing profile photo upload response: $e');
+        }
+        setState(() {
+          _isUploadingProfileImage = false;
+        });
+      } else {
+        setState(() {
+          _isUploadingProfileImage = false;
+        });
+      }
+    } catch (e) {
+      print('Error uploading profile image: $e');
+      setState(() {
+        _isUploadingProfileImage = false;
+      });
+    }
+  }
   late PageController _pageController;
   late ScrollController _scrollController;
   final GlobalKey _productGridKey = GlobalKey();
@@ -1196,28 +1101,22 @@ class _HomePageState extends State<HomePage> {
   Map<String, dynamic> _dynamicStoreInfo = {};
   Map<String, dynamic> _dynamicDesignSettings = {};
   Color _pageBackgroundColor = Colors.white;
-  bool _isMounted = false;
-  int _currentSliderIndex = 0;
-  
   @override
   void initState() {
     super.initState();
-    _isMounted = true;
     _pageController = PageController(initialPage: 0);
     _scrollController = ScrollController();
-    _dynamicProductCards = List.from(productCards);
+    _dynamicProductCards = List.from(productCards); // Fallback to static data
     _filteredProducts = List.from(_dynamicProductCards);
     _loadDynamicData();
   }
-  
   @override
   void dispose() {
-    _isMounted = false;
     _pageController.dispose();
     _scrollController.dispose();
     super.dispose();
   }
-  
+  // Scroll to product grid section
   void _scrollToProductGrid() {
     final context = _productGridKey.currentContext;
     if (context != null) {
@@ -1228,7 +1127,7 @@ class _HomePageState extends State<HomePage> {
       );
     }
   }
-  
+  // Handle buy now functionality
   void _handleBuyNow() {
     Navigator.push(
       context,
@@ -1237,32 +1136,29 @@ class _HomePageState extends State<HomePage> {
       ),
     );
   }
-  
+  // Real-time updates removed - app updates dynamically via WebSocket
   Future<void> _loadDynamicData() async {
-    if (_isMounted) {
-      setState(() => _isLoading = true);
-    }
+    setState(() => _isLoading = true);
     await _loadDynamicAppConfig();
-    if (_isMounted) {
+    if (mounted) {
       setState(() => _isLoading = false);
     }
   }
-  
+  // Load dynamic data from backend
   Future<void> _loadDynamicAppConfig() async {
     try {
+      // Get dynamic admin ID
       final adminId = await AdminManager.getCurrentAdminId();
-      print('Home page using admin ID: $adminId');
-      
+      print('Ã°Å¸â€Â Home page using admin ID: ${adminId}');
       final response = await http.get(
-        Uri.parse('${ApiConfig.baseUrl}/api/get-form?adminId=$adminId&appId=${ApiConfig.appId}'),
+        Uri.parse('${dotenv.env['API_BASE'] ?? (throw Exception('API_BASE environment variable is not set. Please configure it in your .env file.'))}/api/get-form?adminId=${adminId}&appId=${ApiConfig.appId}'),
         headers: {'Content-Type': 'application/json'},
       );
-      
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
         if (data['success'] == true) {
           final pages = (data['pages'] is List) ? List.from(data['pages']) : <dynamic>[];
-          
+          // Page-level properties (overall background, etc.)
           Map<String, dynamic> pageProps = <String, dynamic>{};
           if (pages.isNotEmpty && pages.first is Map) {
             final propsRaw = (pages.first as Map)['properties'];
@@ -1270,12 +1166,12 @@ class _HomePageState extends State<HomePage> {
               pageProps = Map<String, dynamic>.from(propsRaw);
             }
           }
-          
+          // Extract widgets from first page (Home)
           List<Map<String, dynamic>> extractedWidgets = [];
           if (pages.isNotEmpty && pages.first is Map && (pages.first as Map)['widgets'] is List) {
             extractedWidgets = List<Map<String, dynamic>>.from((pages.first as Map)['widgets']);
           }
-          
+          // Extract products from widget properties (if present)
           List<Map<String, dynamic>> extractedProducts = [];
           for (final w in extractedWidgets) {
             final name = (w['name'] ?? '').toString();
@@ -1286,7 +1182,7 @@ class _HomePageState extends State<HomePage> {
               }
             }
           }
-          
+          // Sort widgets to ensure HeaderWidget appears first
           extractedWidgets.sort((a, b) {
             bool aIsHeader = a['name'] == 'HeaderWidget';
             bool bIsHeader = b['name'] == 'HeaderWidget';
@@ -1294,48 +1190,41 @@ class _HomePageState extends State<HomePage> {
             if (!aIsHeader && bIsHeader) return 1;
             return 0;
           });
-          
           final storeInfo = (data['storeInfo'] is Map) ? Map<String, dynamic>.from(data['storeInfo']) : <String, dynamic>{};
           final designSettings = (data['designSettings'] is Map)
               ? Map<String, dynamic>.from(data['designSettings'])
               : <String, dynamic>{};
-          
-          if (_isMounted) {
-            setState(() {
-              _dynamicProductCards = extractedProducts.isNotEmpty ? extractedProducts : productCards;
-              _filterProducts(_searchQuery);
-              _homeWidgets = extractedWidgets;
-              _dynamicStoreInfo = storeInfo;
-              _dynamicDesignSettings = designSettings;
-              _pageBackgroundColor = _colorFromHex(pageProps['backgroundColor']?.toString()) ?? Colors.white;
-              _isLoading = false;
-            });
-          }
-          print('Loaded ${_dynamicProductCards.length} products from backend');
+          setState(() {
+            _dynamicProductCards = extractedProducts.isNotEmpty ? extractedProducts : productCards;
+            _filterProducts(_searchQuery); // Re-apply current filter
+            _homeWidgets = extractedWidgets;
+            _dynamicStoreInfo = storeInfo;
+            _dynamicDesignSettings = designSettings;
+            _pageBackgroundColor = _colorFromHex(pageProps['backgroundColor']?.toString()) ?? Colors.white;
+            _isLoading = false;
+          });
+          print('Ã¢Å“â€¦ Loaded ${_dynamicProductCards.length} products from backend');
         }
       }
     } catch (e) {
-      print('Error loading dynamic data: $e');
-      if (_isMounted) {
-        setState(() => _isLoading = false);
-      }
+      print('Ã¢ÂÅ’ Error loading dynamic data: $e');
+      setState(() => _isLoading = false);
     }
   }
-  
   void _onPageChanged(int index) => setState(() => _currentPageIndex = index);
-  
   void _onItemTapped(int index) {
     setState(() {
       _currentPageIndex = index;
+      // Clear ONLY notification badges when opening Cart/Wishlist.
+      // Do NOT clear the actual cart/wishlist items.
       if (index == 1) {
-        _wishlistNotificationCount = 0;
-      } else if (index == 2) {
         _cartNotificationCount = 0;
+      } else if (index == 2) {
+        _wishlistNotificationCount = 0;
       }
     });
     _pageController.jumpToPage(index);
   }
-  
   void _filterProducts(String query) {
     setState(() {
       _searchQuery = query;
@@ -1352,7 +1241,6 @@ class _HomePageState extends State<HomePage> {
       }
     });
   }
-  
   IconData _getIconData(String iconName) {
     switch (iconName) {
       case 'home':
@@ -1367,26 +1255,27 @@ class _HomePageState extends State<HomePage> {
         return Icons.error;
     }
   }
-  
   String _currencySymbolForProduct(Map<String, dynamic> product) {
+    // First try to detect from the raw price string (most reliable)
     final String rawPrice = (product['price'] ?? '').toString();
     final String detected = PriceUtils.detectCurrency(rawPrice);
-    if (detected != '\$') return detected;
+    if (detected != '$') return detected;
+    // Fall back to explicit currency symbol field
     final String symbol = (product['currencySymbol'] ?? '').toString();
     if (symbol.isNotEmpty) return symbol;
+    // Fall back to currency code
     final String code = (product['currencyCode'] ?? '').toString();
     if (code.isNotEmpty) return PriceUtils.currencySymbolFromCode(code);
-    return '\$';
+    return '$';
   }
-  
   @override
   Widget build(BuildContext context) => Scaffold(
     body: IndexedStack(
       index: _currentPageIndex,
       children: [
         _buildHomePage(),
-        _buildWishlistPage(),
         _buildCartPage(),
+        _buildWishlistPage(),
         _buildProfilePage(),
       ],
     ),
@@ -1409,7 +1298,6 @@ class _HomePageState extends State<HomePage> {
         ? FloatingActionButtonLocation.startFloat
         : null,
   );
-  
   Widget _buildHomePage() {
     if (_isLoading) {
       return const Center(
@@ -1423,7 +1311,6 @@ class _HomePageState extends State<HomePage> {
         ),
       );
     }
-    
     return RefreshIndicator(
       onRefresh: _loadDynamicData,
       child: Container(
@@ -1438,7 +1325,6 @@ class _HomePageState extends State<HomePage> {
                   : <Widget>[
                       _buildHomeWidgetFromConfig({'name': 'HeaderWidget', 'properties': {}}),
                       _buildHomeWidgetFromConfig({'name': 'HeroBannerWidget', 'properties': {}}),
-                      _buildHomeWidgetFromConfig({'name': 'ImageSliderWidget', 'properties': {}}),
                       _buildHomeWidgetFromConfig({'name': 'ProductSearchBarWidget', 'properties': {}}),
                       _buildHomeWidgetFromConfig({'name': 'Catalog View Card', 'properties': {}}),
                       _buildHomeWidgetFromConfig({'name': 'StoreInfoWidget', 'properties': {}}),
@@ -1449,15 +1335,14 @@ class _HomePageState extends State<HomePage> {
       ),
     );
   }
-  
   Widget _buildHomeWidgetFromConfig(Map<String, dynamic> widgetData) {
     final name = (widgetData['name'] ?? '').toString();
     final props = widgetData['properties'] is Map
         ? Map<String, dynamic>.from(widgetData['properties'])
         : <String, dynamic>{};
-    
     switch (name) {
       case 'HeaderWidget':
+        // Dynamic Header Widget - prefers widget properties, falls back to API data
         final appName = (props['appName'] ?? _dynamicStoreInfo['storeName'] ?? 'My Store').toString();
         final logoAsset = (props['logoAsset'] ?? '').toString();
         final bg = (props['backgroundColor'] ?? _dynamicDesignSettings['headerColor'] ?? '#4fb322').toString();
@@ -1532,8 +1417,8 @@ class _HomePageState extends State<HomePage> {
             ),
           ),
         );
-        
       case 'HeroBannerWidget':
+        // Dynamic HeroBanner Widget - matches preview exactly
         final imageAsset = props['imageAsset'];
         final title = props['title'] ?? 'Welcome to Our Store!';
         final subtitle = props['subtitle'] ?? 'Shop the latest products';
@@ -1668,11 +1553,8 @@ class _HomePageState extends State<HomePage> {
             ),
           ),
         );
-        
-      case 'ImageSliderWidget':
-        return _buildImageSliderWidget(props);
-        
       case 'ProductSearchBarWidget':
+        // Dynamic ProductSearchBar Widget - matches preview exactly
         final placeholder = props['placeholder'] ?? 'Search products';
         final height = double.tryParse(props['height']?.toString() ?? '50') ?? 50.0;
         final width = double.tryParse(props['width']?.toString() ?? '300') ?? 300.0;
@@ -1728,12 +1610,11 @@ class _HomePageState extends State<HomePage> {
             ],
           ),
         );
-        
       case 'Catalog View Card':
       case 'Product Detail Card':
         return _buildDynamicProductGrid(styleProps: props);
-        
       case 'StoreInfoWidget':
+        // Dynamic StoreInfo Widget - prefers widget properties, falls back to API data
         final storeName = ((props['storeName'] ?? _dynamicStoreInfo['storeName'])?.toString().trim() ?? '');
         final address = ((props['address'] ?? _dynamicStoreInfo['address'])?.toString().trim() ?? '');
         final email = ((props['email'] ?? _dynamicStoreInfo['email'])?.toString().trim() ?? '');
@@ -1858,209 +1739,296 @@ class _HomePageState extends State<HomePage> {
             ),
           ),
         );
-        
+      case 'ImageSliderWidget':
+        // Dynamic ImageSlider Widget - fetch from API like web preview
+        final height = double.tryParse(props['height']?.toString() ?? '150') ?? 150.0;
+        final width = double.tryParse(props['width']?.toString() ?? '300') ?? 300.0;
+        final borderRadius = double.tryParse(props['borderRadius']?.toString() ?? '12') ?? 12.0;
+        final autoPlay = props['autoPlay'] ?? true;
+        final autoPlayInterval = int.tryParse(props['autoPlayInterval']?.toString() ?? '3') ?? 3;
+        final showIndicators = props['showIndicators'] ?? true;
+        final enableInfiniteScroll = true;
+        // Use dynamic slider images from API like web preview
+        List<Map<String, dynamic>> sliderImages = [];
+        // Find ImageSliderWidget in dynamic home widgets and extract sliderImages
+        if (_homeWidgets.isNotEmpty) {
+          for (var widget in _homeWidgets) {
+            if (widget is Map && widget['name'] == 'ImageSliderWidget') {
+              var widgetProps = widget['properties'] ?? {};
+              if (widgetProps['sliderImages'] != null) {
+                sliderImages = List<Map<String, dynamic>>.from(widgetProps['sliderImages']);
+                break;
+              }
+            }
+          }
+        }
+        // Fallback to static props if no dynamic images found
+        if (sliderImages.isEmpty && props['sliderImages'] != null) {
+          sliderImages = List<Map<String, dynamic>>.from(props['sliderImages']);
+        }
+        return Container(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (sliderImages.isNotEmpty)
+                Column(
+                  children: [
+                    Container(
+                      constraints: BoxConstraints(
+                        maxWidth: width,
+                        maxHeight: height + 20, // Add padding to prevent overflow
+                      ),
+                      child: CarouselSlider(
+                        options: CarouselOptions(
+                          height: height,
+                          autoPlay: autoPlay,
+                          autoPlayInterval: Duration(seconds: autoPlayInterval),
+                          autoPlayAnimationDuration: const Duration(milliseconds: 800),
+                          autoPlayCurve: Curves.fastOutSlowIn,
+                          enlargeCenterPage: true,
+                          scrollDirection: Axis.horizontal,
+                          enableInfiniteScroll: enableInfiniteScroll,
+                          viewportFraction: 0.8,
+                          enlargeFactor: 0.3,
+                        ),
+                        items: sliderImages.map((imageData) {
+                          return Builder(
+                            builder: (BuildContext context) {
+                              return Container(
+                                margin: const EdgeInsets.symmetric(horizontal: 5.0),
+                                decoration: BoxDecoration(
+                                  color: Colors.grey[300],
+                                  borderRadius: BorderRadius.circular(borderRadius),
+                                ),
+                                child: Stack(
+                                  children: [
+                                    ClipRRect(
+                                      borderRadius: BorderRadius.circular(borderRadius),
+                                      child: imageData['imageAsset']?.isNotEmpty == true
+                                          ? imageData['imageAsset'].toString().startsWith('data:image/')
+                                              ? Image.memory(
+                                                  base64Decode(imageData['imageAsset'].toString().split(',')[1]),
+                                                  width: double.infinity,
+                                                  height: height,
+                                                  fit: BoxFit.cover,
+                                                )
+                                              : Image.network(
+                                                  imageData['imageAsset'].toString(),
+                                                  width: double.infinity,
+                                                  height: height,
+                                                  fit: BoxFit.cover,
+                                                )
+                                          : Container(
+                                              color: Colors.grey[300],
+                                              child: const Center(
+                                                child: Icon(Icons.image, size: 40, color: Colors.grey),
+                                              ),
+                                            ),
+                                    ),
+                                  ],
+                                ),
+                              );
+                            },
+                          );
+                        }).toList(),
+                      ),
+                    ),
+                    if (showIndicators)
+                      const SizedBox(height: 8),
+                    if (showIndicators)
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: sliderImages.asMap().entries.map((entry) {
+                          return GestureDetector(
+                            onTap: () {},
+                            child: Container(
+                              width: 6.0,
+                              height: 6.0,
+                              margin: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: Colors.blue.withOpacity(0.4),
+                              ),
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                  ],
+                )
+              else
+                Container(
+                  height: height,
+                  decoration: BoxDecoration(
+                    color: Colors.grey[300],
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Center(
+                    child: Text('No images added to slider', style: TextStyle(fontSize: 12)),
+                  ),
+                ),
+            ],
+          ),
+        );
+      case 'ProductDescriptionWidget':
+        // Dynamic ProductDescription Widget - matches preview exactly
+        final title = props['descriptionTitle'] ?? 'Description';
+        final content = props['descriptionContent'] ?? '';
+        final productImage = props['productImage'];
+        final titleFontSize = double.tryParse(props['titleFontSize']?.toString() ?? '18') ?? 18.0;
+        final contentFontSize = double.tryParse(props['contentFontSize']?.toString() ?? '14') ?? 14.0;
+        final titleColor = props['titleColor'] != null
+            ? _colorFromHex(props['titleColor'])
+            : Colors.black;
+        final contentColor = props['contentColor'] != null
+            ? _colorFromHex(props['contentColor'])
+            : Colors.grey.shade700;
+        final backgroundColor = props['backgroundColor'] != null
+            ? _colorFromHex(props['backgroundColor'])
+            : Colors.white;
+        return Container(
+          width: double.infinity,
+          margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          child: Card(
+            elevation: 2,
+            color: backgroundColor,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: TextStyle(
+                      fontSize: titleFontSize,
+                      fontWeight: FontWeight.bold,
+                      color: titleColor,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  if (productImage != null && productImage.toString().isNotEmpty)
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(12),
+                      child: productImage.toString().startsWith('data:image/')
+                          ? Image.memory(
+                              base64Decode(productImage.toString().split(',')[1]),
+                              width: double.infinity,
+                              height: 160,
+                              fit: BoxFit.cover,
+                            )
+                          : Image.network(
+                              productImage,
+                              width: double.infinity,
+                              height: 160,
+                              fit: BoxFit.cover,
+                            ),
+                    ),
+                  if (productImage != null && productImage.toString().isNotEmpty) const SizedBox(height: 12),
+                  if (content.isNotEmpty)
+                    Text(
+                      content,
+                      style: TextStyle(
+                        fontSize: contentFontSize,
+                        color: contentColor,
+                        height: 1.5,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        );
+      case 'SmallCardWidget':
+        final title = (props['title'] ?? 'Small Card').toString();
+        final subtitle = (props['subtitle'] ?? 'Card subtitle').toString();
+        return Container(
+          margin: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+          child: Card(
+            elevation: 2,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Row(
+                children: [
+                  Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      color: Colors.blue.shade100,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Icon(Icons.card_giftcard, color: Colors.blue),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          title,
+                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                        ),
+                        Text(
+                          subtitle,
+                          style: TextStyle(color: Colors.grey[600], fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
       default:
         return const SizedBox.shrink();
     }
   }
-  
-  Widget _buildImageSliderWidget(Map<String, dynamic> props) {
-    final height = double.tryParse(props['height']?.toString() ?? '200') ?? 200.0;
-    final width = double.tryParse(props['width']?.toString() ?? '350') ?? 350.0;
-    final borderRadius = double.tryParse(props['borderRadius']?.toString() ?? '12') ?? 12.0;
-    final autoPlay = props['autoPlay'] ?? true;
-    final autoPlayInterval = int.tryParse(props['autoPlayInterval']?.toString() ?? '3') ?? 3;
-    final showIndicators = props['showIndicators'] ?? true;
-    final enableInfiniteScroll = true;
-    
-    // Get slider images from props
-    List<Map<String, dynamic>> sliderImages = [];
-    if (props['sliderImages'] != null) {
-      sliderImages = List<Map<String, dynamic>>.from(props['sliderImages']);
+  // Load dynamic store data from backend
+  Future<Map<String, dynamic>> _loadDynamicStoreData() async {
+    try {
+      final adminId = await AdminManager.getCurrentAdminId();
+      final response = await http.get(
+        Uri.parse('${dotenv.env['API_BASE'] ?? (throw Exception('API_BASE environment variable is not set. Please configure it in your .env file.'))}/api/get-form?adminId=${adminId}&appId=${ApiConfig.appId}'),
+        headers: {'Content-Type': 'application/json'},
+      );
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        if (data['success'] == true) {
+          // Extract store info from the response
+          final storeInfo = data['storeInfo'] ?? {};
+          final designSettings = data['designSettings'] ?? {};
+          return {
+            'storeName': data['shopName'] ?? storeInfo['storeName'] ?? 'My Store',
+            'address': storeInfo['address'] ?? '123 Main St',
+            'email': storeInfo['email'] ?? 'support@example.com',
+            'phone': storeInfo['phone'] ?? '(123) 456-7890',
+            'headerColor': designSettings['headerColor'] ?? '#4fb322',
+            'bannerText': designSettings['bannerText'] ?? 'Welcome to our store!',
+            'bannerButtonText': designSettings['bannerButtonText'] ?? 'Shop Now',
+          };
+        }
+      }
+    } catch (e) {
+      print('Error loading store data: 2.718281828459045');
     }
-    
-    // If no images, use default placeholder
-    if (sliderImages.isEmpty) {
-      sliderImages = [
-        {'imageAsset': '', 'title': 'Slide 1'},
-        {'imageAsset': '', 'title': 'Slide 2'},
-        {'imageAsset': '', 'title': 'Slide 3'},
-      ];
-    }
-    
-    return Container(
-      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
-      child: Column(
-        children: [
-          SizedBox(
-            width: width,
-            height: height,
-            child: CarouselSlider(
-              options: CarouselOptions(
-                height: height,
-                autoPlay: autoPlay,
-                autoPlayInterval: Duration(seconds: autoPlayInterval),
-                autoPlayAnimationDuration: const Duration(milliseconds: 800),
-                autoPlayCurve: Curves.fastOutSlowIn,
-                enlargeCenterPage: true,
-                scrollDirection: Axis.horizontal,
-                enableInfiniteScroll: enableInfiniteScroll,
-                viewportFraction: 0.9,
-                enlargeFactor: 0.3,
-                onPageChanged: (index, reason) {
-                  setState(() {
-                    _currentSliderIndex = index;
-                  });
-                },
-              ),
-              items: sliderImages.map((imageData) {
-                final imageAsset = imageData['imageAsset'] ?? '';
-                final title = imageData['title'] ?? '';
-                final subtitle = imageData['subtitle'] ?? '';
-                
-                return Builder(
-                  builder: (BuildContext context) {
-                    return Container(
-                      margin: const EdgeInsets.symmetric(horizontal: 4.0),
-                      decoration: BoxDecoration(
-                        color: Colors.grey[200],
-                        borderRadius: BorderRadius.circular(borderRadius),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withOpacity(0.1),
-                            blurRadius: 8,
-                            offset: const Offset(0, 4),
-                          ),
-                        ],
-                      ),
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(borderRadius),
-                        child: Stack(
-                          fit: StackFit.expand,
-                          children: [
-                            // Image
-                            if (imageAsset.isNotEmpty)
-                              imageAsset.startsWith('data:image/')
-                                  ? Image.memory(
-                                      base64Decode(imageAsset.split(',')[1]),
-                                      width: double.infinity,
-                                      height: double.infinity,
-                                      fit: BoxFit.cover,
-                                    )
-                                  : Image.network(
-                                      imageAsset,
-                                      width: double.infinity,
-                                      height: double.infinity,
-                                      fit: BoxFit.cover,
-                                      errorBuilder: (context, error, stackTrace) => Container(
-                                        color: Colors.grey[300],
-                                        child: const Icon(Icons.image, size: 50, color: Colors.grey),
-                                      ),
-                                    )
-                            else
-                              Container(
-                                color: Colors.grey[300],
-                                child: const Icon(Icons.image, size: 50, color: Colors.grey),
-                              ),
-                            
-                            // Gradient overlay for text
-                            Container(
-                              decoration: BoxDecoration(
-                                gradient: LinearGradient(
-                                  begin: Alignment.bottomCenter,
-                                  end: Alignment.topCenter,
-                                  colors: [
-                                    Colors.black.withOpacity(0.6),
-                                    Colors.transparent,
-                                  ],
-                                ),
-                              ),
-                            ),
-                            
-                            // Text overlay
-                            if (title.isNotEmpty || subtitle.isNotEmpty)
-                              Padding(
-                                padding: const EdgeInsets.all(16.0),
-                                child: Column(
-                                  mainAxisAlignment: MainAxisAlignment.end,
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    if (title.isNotEmpty)
-                                      Text(
-                                        title,
-                                        style: const TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 20,
-                                          fontWeight: FontWeight.bold,
-                                          shadows: [
-                                            Shadow(
-                                              color: Colors.black38,
-                                              blurRadius: 4,
-                                              offset: Offset(0, 2),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    if (subtitle.isNotEmpty) ...[
-                                      const SizedBox(height: 4),
-                                      Text(
-                                        subtitle,
-                                        style: TextStyle(
-                                          color: Colors.white.withOpacity(0.9),
-                                          fontSize: 14,
-                                          shadows: [
-                                            const Shadow(
-                                              color: Colors.black38,
-                                              blurRadius: 4,
-                                              offset: Offset(0, 2),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    ],
-                                  ],
-                                ),
-                              ),
-                          ],
-                        ),
-                      ),
-                    );
-                  },
-                );
-              }).toList(),
-            ),
-          ),
-          // Indicators
-          if (showIndicators && sliderImages.length > 1)
-            Container(
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: sliderImages.asMap().entries.map((entry) {
-                  return Container(
-                    width: _currentSliderIndex == entry.key ? 12.0 : 8.0,
-                    height: _currentSliderIndex == entry.key ? 12.0 : 8.0,
-                    margin: const EdgeInsets.symmetric(horizontal: 4.0),
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: _currentSliderIndex == entry.key
-                          ? Colors.blue
-                          : Colors.blue.withOpacity(0.3),
-                    ),
-                  );
-                }).toList(),
-              ),
-            ),
-        ],
-      ),
-    );
+    // Return default values if API fails
+    return {
+      'storeName': 'My Store',
+      'address': '123 Main St',
+      'email': 'support@example.com',
+      'phone': '(123) 456-7890',
+      'headerColor': '#4fb322',
+      'bannerText': 'Welcome to our store!',
+      'bannerButtonText': 'Shop Now',
+    };
   }
-  
+  // Build dynamic product grid
   Widget _buildDynamicProductGrid({Map<String, dynamic>? styleProps}) {
     final products = _searchQuery.isEmpty ? _dynamicProductCards : _filteredProducts;
     final Map<String, dynamic> props = styleProps ?? const <String, dynamic>{};
     final Color gridBackgroundColor = _colorFromHex(props['backgroundColor']?.toString()) ?? Colors.transparent;
-    
     if (products.isEmpty) {
       return Container(
         padding: const EdgeInsets.all(32),
@@ -2076,7 +2044,6 @@ class _HomePageState extends State<HomePage> {
         ),
       );
     }
-    
     return Container(
       key: _productGridKey,
       color: gridBackgroundColor == Colors.transparent ? null : gridBackgroundColor,
@@ -2098,11 +2065,39 @@ class _HomePageState extends State<HomePage> {
       ),
     );
   }
-  
+  // Load dynamic products from backend
+  Future<List<Map<String, dynamic>>> _loadDynamicProducts() async {
+    try {
+      final adminId = await AdminManager.getCurrentAdminId();
+      final response = await http.get(
+        Uri.parse('${dotenv.env['API_BASE'] ?? (throw Exception('API_BASE environment variable is not set. Please configure it in your .env file.'))}/api/get-form?adminId=${adminId}&appId=${ApiConfig.appId}'),
+        headers: {'Content-Type': 'application/json'},
+      );
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        if (data['success'] == true && data['widgets'] != null) {
+          // Extract product data from widgets
+          List<Map<String, dynamic>> products = [];
+          for (var widget in data['widgets']) {
+            if (widget['name'] == 'ProductGridWidget' || 
+                widget['name'] == 'Catalog View Card' ||
+                widget['name'] == 'Product Detail Card') {
+              final productCards = widget['properties']?['productCards'] ?? [];
+              products.addAll(List<Map<String, dynamic>>.from(productCards));
+            }
+          }
+          return products;
+        }
+      }
+    } catch (e) {
+      print('Error loading products: 2.718281828459045');
+    }
+    return [];
+  }
+  // Quantity management methods
   int _getProductQuantity(String productId) {
     return _productQuantities[productId] ?? 1;
   }
-  
   void _incrementQuantity(String productId) {
     final currentQuantity = _getProductQuantity(productId);
     if (currentQuantity < 10) {
@@ -2111,7 +2106,6 @@ class _HomePageState extends State<HomePage> {
       });
     }
   }
-  
   void _decrementQuantity(String productId) {
     final currentQuantity = _getProductQuantity(productId);
     if (currentQuantity > 1) {
@@ -2120,11 +2114,10 @@ class _HomePageState extends State<HomePage> {
       });
     }
   }
-  
   int _getTotalCartQuantity() {
     return _productQuantities.values.fold(0, (sum, quantity) => sum + quantity);
   }
-  
+  // Build individual product card
   Widget _buildProductCard(Map<String, dynamic> product, int index, {Map<String, dynamic>? styleProps}) {
     final String productId = 'product_' + index.toString();
     final String productName = product['productName'] ?? product['name'] ?? 'Product';
@@ -2133,7 +2126,7 @@ class _HomePageState extends State<HomePage> {
     final Color borderColor = _colorFromHex(props['borderColor']?.toString()) ?? Colors.transparent;
     final Color priceColor = _colorFromHex(props['priceColor']?.toString()) ?? Colors.blue;
     final Color discountBadgeColor = _colorFromHex(props['discountBadgeColor']?.toString()) ?? Colors.redAccent;
-    
+    // Try multiple possible price field names
     final String? priceField1 = product['price']?.toString();
     final String? priceField2 = product['basePrice']?.toString();
     final String? priceField3 = product['currentPrice']?.toString();
@@ -2150,25 +2143,22 @@ class _HomePageState extends State<HomePage> {
         : (manualDiscountPrice > 0 ? manualDiscountPrice : basePrice);
     final bool hasDiscount = hasPercentDiscount || (manualDiscountPrice > 0 && manualDiscountPrice < basePrice);
     final String? image = product['imageAsset'] ?? product['image'];
+    final String rating = product['rating']?.toString() ?? '4.0';
     final int quantityAvailable = int.tryParse((product['quantity'] ?? '10').toString()) ?? 10;
     final bool isSoldOut = quantityAvailable <= 0;
-    
     final String discountLabel;
     if (hasPercentDiscount) {
-      discountLabel = '${badgeDiscountPercent.round()}% OFF';
+      discountLabel = '0% OFF';
     } else {
       discountLabel = 'OFFER';
     }
-    
     final String stockLabel;
     if (isSoldOut) {
       stockLabel = 'SOLD OUT';
     } else {
-      stockLabel = 'In stock: ${quantityAvailable}';
+      stockLabel = 'In stock: 0';
     }
-    
     final bool isInWishlist = _wishlistManager.isInWishlist(productId);
-    
     return Container(
       constraints: const BoxConstraints(
         minHeight: 320,
@@ -2183,6 +2173,7 @@ class _HomePageState extends State<HomePage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // Image + badges section
             Expanded(
               flex: 2,
               child: Stack(
@@ -2263,6 +2254,7 @@ class _HomePageState extends State<HomePage> {
                         ),
                       ),
                     ),
+                  // Wishlist button in top right corner
                   Positioned(
                     top: 8,
                     right: 8,
@@ -2315,6 +2307,7 @@ class _HomePageState extends State<HomePage> {
                 ],
               ),
             ),
+            // Content section
             Expanded(
               flex: 3,
               child: Padding(
@@ -2323,6 +2316,7 @@ class _HomePageState extends State<HomePage> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
+                    // Product name
                     Text(
                       productName,
                       style: const TextStyle(
@@ -2333,6 +2327,7 @@ class _HomePageState extends State<HomePage> {
                       overflow: TextOverflow.ellipsis,
                     ),
                     const SizedBox(height: 4),
+                    // Price + stock
                     Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
@@ -2359,9 +2354,10 @@ class _HomePageState extends State<HomePage> {
                           ],
                         ),
                         const SizedBox(height: 2),
+                        // Only show stock label for items that are in stock and only for admin users
                         if (!isSoldOut)
                           FutureBuilder<bool>(
-                            future: AuthHelper.isAdmin(),
+                            future: authHelper.isAdmin(),
                             builder: (context, snapshot) {
                               if (snapshot.hasData && snapshot.data == true) {
                                 return Text(
@@ -2373,12 +2369,13 @@ class _HomePageState extends State<HomePage> {
                                   ),
                                 );
                               }
-                              return const SizedBox.shrink();
+                              return SizedBox.shrink();
                             },
                           ),
                       ],
                     ),
                     const SizedBox(height: 4),
+                    // Add to Cart section with quantity controller
                     Builder(
                       builder: (context) {
                         final currentQuantity = _cartManager.items
@@ -2494,29 +2491,44 @@ class _HomePageState extends State<HomePage> {
       ),
     );
   }
-  
+  // Helper methods for social sharing
+  void _shareToPlatform(String platform, String link, String text) {
+    // Simple implementation - in real app would use url_launcher or share_plus
+    print('Share to ' + platform + ': ' + link + ' with text: ' + text);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Sharing to ' + platform + '...')),
+    );
+  }
+  void _copyShareLink(String link) {
+    // Simple implementation - in real app would use clipboard
+    print('Copy link: ' + link);
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Link copied to clipboard!')),
+    );
+  }
+  // Helper method to convert hex color to Color
   Color _colorFromHex(String? hexColor) {
     if (hexColor == null || hexColor.isEmpty) return Colors.blue;
     String localFormattedColor = hexColor.toUpperCase().replaceAll('#', '');
     if (localFormattedColor.length == 6) {
       localFormattedColor = 'FF' + localFormattedColor;
     } else if (localFormattedColor.length == 8) {
+      // Already has alpha channel
     } else {
       return Colors.blue;
     }
     try {
       return Color(int.parse('0x' + localFormattedColor));
     } catch (e) {
-      print('Invalid color: $hexColor');
+      print('Invalid color: ' + hexColor);
       return Colors.blue;
     }
   }
-  
   Widget _buildCartPage() {
     return Scaffold(
       floatingActionButton: FloatingActionButton(
         onPressed: () {
-          final shop = (_dynamicStoreInfo['storeName'] ?? 'My Store').toString();
+          final shop = (_currentStoreInfo['storeName'] ?? 'My Store').toString();
           Navigator.push(
             context,
             MaterialPageRoute(
@@ -2527,7 +2539,7 @@ class _HomePageState extends State<HomePage> {
         child: const Icon(Icons.support_agent_outlined),
       ),
       floatingActionButtonLocation: FloatingActionButtonLocation.startFloat,
-      appBar: AppBar(
+appBar: AppBar(
         title: const Text('Shopping Cart'),
         automaticallyImplyLeading: false,
       ),
@@ -2545,240 +2557,250 @@ class _HomePageState extends State<HomePage> {
                     ],
                   ),
                 )
-              : Column(
-                  children: [
-                    Expanded(
-                      child: ListView.builder(
-                        itemCount: _cartManager.items.length,
-                        itemBuilder: (context, index) {
-                          final item = _cartManager.items[index];
-                          return Card(
-                            margin: const EdgeInsets.all(8),
-                            child: Padding(
-                              padding: const EdgeInsets.all(16),
-                              child: Row(
-                                children: [
-                                  Container(
-                                    width: 60,
-                                    height: 60,
-                                    color: Colors.grey[300],
-                                    child: item.image != null && item.image!.isNotEmpty
-                                        ? (item.image!.startsWith('data:image/')
-                                        ? Image.memory(
-                                      base64Decode(item.image!.split(',')[1]),
-                                      width: 60,
-                                      height: 60,
-                                      fit: BoxFit.cover,
-                                      errorBuilder: (context, error, stackTrace) => const Icon(Icons.image),
-                                    )
-                                        : Image.network(
-                                      item.image!,
-                                      width: 60,
-                                      height: 60,
-                                      fit: BoxFit.cover,
-                                      errorBuilder: (context, error, stackTrace) => const Icon(Icons.image),
-                                    ))
-                                        : const Icon(Icons.image),
-                                  ),
-                                  const SizedBox(width: 12),
-                                  Expanded( 
-                                    child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: [
-                                        Text(item.name, style: const TextStyle(fontWeight: FontWeight.bold)),
-                                        Text(
-                                          PriceUtils.formatPrice(item.effectivePrice, currency: item.currencySymbol),
-                                          style: const TextStyle(
-                                            fontSize: 16,
-                                            fontWeight: FontWeight.bold,
-                                            color: Colors.blue,
-                                          ),
+          : Column(
+              children: [
+                Expanded(
+                  child: ListView.builder(
+                    itemCount: _cartManager.items.length,
+                    itemBuilder: (context, index) {
+                      final item = _cartManager.items[index];
+                      return Card(
+                        margin: const EdgeInsets.all(8),
+                        child: Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Row(
+                            children: [
+                              Container(
+                                width: 60,
+                                height: 60,
+                                color: Colors.grey[300],
+                                child: item.image != null && item.image!.isNotEmpty
+                                    ? (item.image!.startsWith('data:image/')
+                                    ? Image.memory(
+                                  base64Decode(item.image!.split(',')[1]),
+                                  width: 60,
+                                  height: 60,
+                                  fit: BoxFit.cover,
+                                  errorBuilder: (context, error, stackTrace) => const Icon(Icons.image),
+                                )
+                                    : Image.network(
+                                  item.image!,
+                                  width: 60,
+                                  height: 60,
+                                  fit: BoxFit.cover,
+                                  errorBuilder: (context, error, stackTrace) => const Icon(Icons.image),
+                                ))
+                                    : const Icon(Icons.image),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded( 
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(item.name, style: const TextStyle(fontWeight: FontWeight.bold)),
+                                    // Show current price (effective price)
+                                    Text(
+                                      PriceUtils.formatPrice(item.effectivePrice, currency: item.currencySymbol),
+                                      style: const TextStyle(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.blue,
+                                      ),
+                                    ),
+                                    // Show original price if there's a discount
+                                    if (item.discountPrice > 0 && item.price != item.discountPrice)
+                                      Text(
+                                        PriceUtils.formatPrice(item.price, currency: item.currencySymbol),
+                                        style: TextStyle(
+                                          fontSize: 14,
+                                          decoration: TextDecoration.lineThrough,
+                                          color: Colors.grey.shade600,
                                         ),
-                                        if (item.discountPrice > 0 && item.price != item.discountPrice)
-                                          Text(
-                                            PriceUtils.formatPrice(item.price, currency: item.currencySymbol),
-                                            style: TextStyle(
-                                              fontSize: 14,
-                                              decoration: TextDecoration.lineThrough,
-                                              color: Colors.grey.shade600,
-                                            ),
-                                          ),
-                                      ],
+                                      ),
+                                  ],
+                                ),
+                              ),
+                              // Quantity controls for all users
+                              Row(
+                                children: [
+                                  // Decrease button
+                                  GestureDetector(
+                                    onTap: () {
+                                      if (item.quantity > 1) {
+                                        _cartManager.updateQuantity(item.id, item.quantity - 1);
+                                      } else {
+                                        // Remove item if quantity is 1 and user clicks -
+                                        _cartManager.removeItem(item.id);
+                                        ScaffoldMessenger.of(context).showSnackBar(
+                                          const SnackBar(content: Text('Item removed from cart')),
+                                        );
+                                      }
+                                    },
+                                    child: Container(
+                                      width: 32,
+                                      height: 32,
+                                      decoration: BoxDecoration(
+                                        color: Colors.grey.shade200,
+                                        borderRadius: BorderRadius.circular(4),
+                                      ),
+                                      child: const Icon(
+                                        Icons.remove,
+                                        size: 16,
+                                        color: Colors.black87,
+                                      ),
                                     ),
                                   ),
-                                  Row(
-                                    children: [
-                                      GestureDetector(
-                                        onTap: () {
-                                          if (item.quantity > 1) {
-                                            _cartManager.updateQuantity(item.id, item.quantity - 1);
-                                          } else {
-                                            _cartManager.removeItem(item.id);
-                                            ScaffoldMessenger.of(context).showSnackBar(
-                                              const SnackBar(content: Text('Item removed from cart')),
-                                            );
-                                          }
-                                        },
-                                        child: Container(
-                                          width: 32,
-                                          height: 32,
-                                          decoration: BoxDecoration(
-                                            color: Colors.grey.shade200,
-                                            borderRadius: BorderRadius.circular(4),
+                                  const SizedBox(width: 8),
+                                  // Quantity display
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                                    decoration: BoxDecoration(
+                                      border: Border.all(color: Colors.grey.shade300),
+                                      borderRadius: BorderRadius.circular(4),
+                                    ),
+                                    child: Text(
+                                      item.quantity.toString(),
+                                      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  // Increase button
+                                  GestureDetector(
+                                    onTap: () {
+                                      // Check if adding this item would exceed the 10 product limit
+                                      if (_cartManager.totalQuantity < 10) {
+                                        _cartManager.updateQuantity(item.id, item.quantity + 1);
+                                      } else {
+                                        ScaffoldMessenger.of(context).showSnackBar(
+                                          const SnackBar(
+                                            content: Text('Only have 10 products allowed'),
+                                            backgroundColor: Colors.orange,
                                           ),
-                                          child: const Icon(
-                                            Icons.remove,
-                                            size: 16,
-                                            color: Colors.black87,
-                                          ),
-                                        ),
+                                        );
+                                      }
+                                    },
+                                    child: Container(
+                                      width: 32,
+                                      height: 32,
+                                      decoration: BoxDecoration(
+                                        color: Colors.grey.shade200,
+                                        borderRadius: BorderRadius.circular(4),
                                       ),
-                                      const SizedBox(width: 8),
-                                      Container(
-                                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                                        decoration: BoxDecoration(
-                                          border: Border.all(color: Colors.grey.shade300),
-                                          borderRadius: BorderRadius.circular(4),
-                                        ),
-                                        child: Text(
-                                          item.quantity.toString(),
-                                          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
-                                        ),
+                                      child: const Icon(
+                                        Icons.add,
+                                        size: 16,
+                                        color: Colors.black87,
                                       ),
-                                      const SizedBox(width: 8),
-                                      GestureDetector(
-                                        onTap: () {
-                                          if (_cartManager.totalQuantity < 10) {
-                                            _cartManager.updateQuantity(item.id, item.quantity + 1);
-                                          } else {
-                                            ScaffoldMessenger.of(context).showSnackBar(
-                                              const SnackBar(
-                                                content: Text('Only have 10 products allowed'),
-                                                backgroundColor: Colors.orange,
-                                              ),
-                                            );
-                                          }
-                                        },
-                                        child: Container(
-                                          width: 32,
-                                          height: 32,
-                                          decoration: BoxDecoration(
-                                            color: Colors.grey.shade200,
-                                            borderRadius: BorderRadius.circular(4),
-                                          ),
-                                          child: const Icon(
-                                            Icons.add,
-                                            size: 16,
-                                            color: Colors.black87,
-                                          ),
-                                        ),
-                                      ),
-                                    ],
+                                    ),
                                   ),
                                 ],
                               ),
-                            ),
-                          );
-                        },
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+                // Bill Summary Section
+                Container(
+                  margin: const EdgeInsets.all(16),
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: Colors.grey[50],
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.grey[300]!),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Bill Summary',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.black87,
+                        ),
                       ),
-                    ),
-                    Container(
-                      margin: const EdgeInsets.all(16),
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(
-                        color: Colors.grey[50],
+                      const SizedBox(height: 12),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 4),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            const Text('Subtotal', style: TextStyle(fontSize: 14, color: Colors.grey)),
+                            Text(PriceUtils.formatPrice(_cartManager.subtotal, currency: _cartManager.displayCurrencySymbol), style: const TextStyle(fontSize: 14, color: Colors.grey)),
+                          ],
+                        ),
+                      ),
+                      if (_cartManager.totalDiscount > 0)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 4),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              const Text('Discount', style: TextStyle(fontSize: 14, color: Colors.grey)),
+                              Text('-' + PriceUtils.formatPrice(_cartManager.totalDiscount, currency: _cartManager.displayCurrencySymbol), style: const TextStyle(fontSize: 14, color: Colors.green)),
+                            ],
+                          ),
+                        ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 4),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            const Text('GST (18%)', style: TextStyle(fontSize: 14, color: Colors.grey)),
+                            Text(PriceUtils.formatPrice(_cartManager.gstAmount, currency: _cartManager.displayCurrencySymbol), style: const TextStyle(fontSize: 14, color: Colors.grey)),
+                          ],
+                        ),
+                      ),
+                      const Divider(thickness: 1),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 4),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            const Text('Total', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.black)),
+                            Text(PriceUtils.formatPrice(_cartManager.finalTotal, currency: _cartManager.displayCurrencySymbol), style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.black)),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                // Buy Now Button
+                Container(
+                  margin: const EdgeInsets.all(16),
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    onPressed: () {
+                      // Handle buy now action
+                      _handleBuyNow();
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.green,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: Colors.grey[300]!),
                       ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            'Bill Summary',
-                            style: TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.black87,
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-                          Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 4),
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                const Text('Subtotal', style: TextStyle(fontSize: 14, color: Colors.grey)),
-                                Text(PriceUtils.formatPrice(_cartManager.subtotal, currency: _cartManager.displayCurrencySymbol), style: const TextStyle(fontSize: 14, color: Colors.grey)),
-                              ],
-                            ),
-                          ),
-                          if (_cartManager.totalDiscount > 0)
-                            Padding(
-                              padding: const EdgeInsets.symmetric(vertical: 4),
-                              child: Row(
-                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                children: [
-                                  const Text('Discount', style: TextStyle(fontSize: 14, color: Colors.grey)),
-                                  Text('-' + PriceUtils.formatPrice(_cartManager.totalDiscount, currency: _cartManager.displayCurrencySymbol), style: const TextStyle(fontSize: 14, color: Colors.green)),
-                                ],
-                              ),
-                            ),
-                          Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 4),
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                const Text('GST (18%)', style: TextStyle(fontSize: 14, color: Colors.grey)),
-                                Text(PriceUtils.formatPrice(_cartManager.gstAmount, currency: _cartManager.displayCurrencySymbol), style: const TextStyle(fontSize: 14, color: Colors.grey)),
-                              ],
-                            ),
-                          ),
-                          const Divider(thickness: 1),
-                          Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 4),
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                const Text('Total', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.black)),
-                                Text(PriceUtils.formatPrice(_cartManager.finalTotal, currency: _cartManager.displayCurrencySymbol), style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.black)),
-                              ],
-                            ),
-                          ),
-                        ],
+                      elevation: 4,
+                    ),
+                    child: const Text(
+                      'Buy Now',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
                       ),
                     ),
-                    Container(
-                      margin: const EdgeInsets.all(16),
-                      width: double.infinity,
-                      child: ElevatedButton(
-                        onPressed: () {
-                          _handleBuyNow();
-                        },
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.green,
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(vertical: 16),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          elevation: 4,
-                        ),
-                        child: const Text(
-                          'Buy Now',
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                );
+                  ),
+                ),
+              ],
+            );
         },
       ),
     );
   }
-  
   Widget _buildWishlistPage() {
     return Scaffold(
       appBar: AppBar(
@@ -2864,9 +2886,7 @@ class _HomePageState extends State<HomePage> {
             ),
     );
   }
-  
   Widget _buildProfilePage() {
-    final mobileSession = MobileSessionManager.instance;
     return Scaffold(
       appBar: AppBar(
         title: const Text('Profile'),
@@ -2875,8 +2895,7 @@ class _HomePageState extends State<HomePage> {
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16.0),
         child: Column(
-          children: [
-            Center(
+          children: [            Center(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
@@ -2887,12 +2906,12 @@ class _HomePageState extends State<HomePage> {
                         CircleAvatar(
                           radius: 60,
                           backgroundColor: Colors.grey,
-                          backgroundImage: mobileSession.profileImage != null && mobileSession.profileImage!.isNotEmpty
-                              ? NetworkImage(mobileSession.profileImage!)
+                          backgroundImage: MobileSessionManager().profileImage != null && MobileSessionManager().profileImage!.isNotEmpty
+                              ? NetworkImage(MobileSessionManager().profileImage!)
                               : null,
                           child: _isUploadingProfileImage
                               ? const CircularProgressIndicator(color: Colors.white)
-                              : (mobileSession.profileImage == null || mobileSession.profileImage!.isEmpty)
+                              : (MobileSessionManager().profileImage == null || MobileSessionManager().profileImage!.isEmpty)
                                   ? const Icon(Icons.person, size: 60, color: Colors.white)
                                   : null,
                         ),
@@ -2914,7 +2933,7 @@ class _HomePageState extends State<HomePage> {
                   ),
                   const SizedBox(height: 20),
                   FutureBuilder<Map<String, dynamic>>(
-                    future: ApiService().getUserProfile(),
+                    future: _fetchUserProfile(),
                     builder: (context, snapshot) {
                       if (snapshot.connectionState == ConnectionState.waiting) {
                         return const CircularProgressIndicator();
@@ -2955,7 +2974,14 @@ class _HomePageState extends State<HomePage> {
                       ),
                     ),
                     onPressed: () {
-                      SessionManager.logout(context);
+                      // Log out and navigate to sign in page
+                      Navigator.pushAndRemoveUntil(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => const SignInPage(),
+                        ),
+                        (route) => false,
+                      );
                     },
                     child: const Text(
                       'Log Out',
@@ -2964,74 +2990,58 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ],
               ),
-            ),
-          ],
+            ),          ],
         ),
       ),
     );
   }
-  
-  Future<void> _showImageOptions() async {
-    final XFile? image = await _picker.pickImage(
-      source: ImageSource.gallery,
-      maxWidth: 1024,
-      maxHeight: 1024,
-      imageQuality: 85,
+  Widget _buildBottomNavigationBar() {
+    return BottomNavigationBar(
+      currentIndex: _currentPageIndex,
+      onTap: _onItemTapped,
+      type: BottomNavigationBarType.fixed,
+      selectedItemColor: Colors.blue,
+      unselectedItemColor: Colors.grey,
+      items: [
+        const BottomNavigationBarItem(
+          icon: Icon(Icons.home),
+          label: 'Home',
+        ),
+        BottomNavigationBarItem(
+          icon: Badge(
+            label: Text('${_cartManager.items.length}'),
+            isLabelVisible: _cartManager.items.length > 0,
+            child: const Icon(Icons.shopping_cart),
+          ),
+          label: 'Cart',
+        ),
+        BottomNavigationBarItem(
+          icon: Badge(
+            label: Text('${_wishlistManager.items.length}'),
+            isLabelVisible: _wishlistManager.items.length > 0,
+            child: const Icon(Icons.favorite),
+          ),
+          label: 'Wishlist',
+        ),
+        const BottomNavigationBarItem(
+          icon: Icon(Icons.person),
+          label: 'Profile',
+        ),
+      ],
     );
-    if (image == null) return;
-    await _uploadProfileImage(image);
   }
-  
-  Future<void> _uploadProfileImage(XFile image) async {
-    setState(() {
-      _isUploadingProfileImage = true;
-    });
+  // Method to fetch user profile data
+  Future<Map<String, dynamic>> _fetchUserProfile() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('auth_token');
-      if (token == null) {
-        setState(() {
-          _isUploadingProfileImage = false;
-        });
-        return;
-      }
-      
-      final uri = Uri.parse('${ApiConfig.baseUrl}/api/user/profile/photo');
-      final request = http.MultipartRequest('POST', uri);
-      request.headers['Authorization'] = 'Bearer ' + token;
-      final bytes = await image.readAsBytes();
-      request.files.add(
-        http.MultipartFile.fromBytes('photo', bytes, filename: image.name),
-      );
-      final streamedResponse = await request.send();
-      final response = await http.Response.fromStream(streamedResponse);
-      
-      if (response.statusCode == 200) {
-        try {
-          final Map<String, dynamic> responseJson = jsonDecode(response.body);
-          if (responseJson['success'] == true && responseJson['presignedUrl'] != null) {
-            final String newUrl = responseJson['presignedUrl'].toString();
-            MobileSessionManager.instance.profileImage = newUrl;
-          }
-        } catch (e) {
-          print('Error parsing profile photo upload response: $e');
-        }
-        setState(() {
-          _isUploadingProfileImage = false;
-        });
-      } else {
-        setState(() {
-          _isUploadingProfileImage = false;
-        });
-      }
+      final ApiService apiService = ApiService();
+      final userProfile = await apiService.getUserProfile();
+      return userProfile;
     } catch (e) {
-      print('Error uploading profile image: $e');
-      setState(() {
-        _isUploadingProfileImage = false;
-      });
+      print('Error fetching user profile: 2.718281828459045');
+      return {};
     }
   }
-  
+}
   Widget _buildBottomNavigationBar() {
     return BottomNavigationBar(
       currentIndex: _currentPageIndex,
@@ -3067,4 +3077,3 @@ class _HomePageState extends State<HomePage> {
       ],
     );
   }
-}
