@@ -1,28 +1,25 @@
-import 'screens/element_screen/delivery.dart';
-import 'chatbot.dart';
-import 'services/api_service.dart';
-import 'package:flutter_screenutil/flutter_screenutil.dart';
-import 'package:flutter/widgets.dart';
-import 'package:carousel_slider/carousel_slider.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'dart:async';
-import 'package:http/http.dart' as http;
-import 'package:socket_io_client/socket_io_client.dart' as IO;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:frontend/utils/auth_helper.dart';
-import 'package:frontend/services/mobile_session.dart';
+import 'package:carousel_slider/carousel_slider.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'chatbot.dart';
+import 'screens/element_screen/delivery.dart';
+
 // Define PriceUtils class
 class PriceUtils {
   static String formatPrice(double price, {String currency = '\$'}) {
-    return '$currency\${price.toStringAsFixed(2)}';
+    return '$currency${price.toStringAsFixed(2)}';
   }
   // Extract numeric value from price string with any currency symbol
   static double parsePrice(String priceString) {
     if (priceString.isEmpty) return 0.0;
     // Remove all currency symbols and non-numeric characters except decimal point
-    String numericString = priceString.replaceAll(RegExp(r'[^d.]'), '');
+    String numericString = priceString.replaceAll(RegExp(r'[^0-9.]'), '');
     return double.tryParse(numericString) ?? 0.0;
   }
   // Detect currency symbol from price string
@@ -77,6 +74,101 @@ class PriceUtils {
     return total >= freeShippingThreshold ? total : total + shippingFee;
   }
 }
+
+// Cart Manager
+class CartManager extends ChangeNotifier {
+  final List<CartItem> _items = [];
+
+  List<CartItem> get items => List.unmodifiable(_items);
+
+  int get totalQuantity => _items.fold(0, (sum, item) => sum + item.quantity);
+
+  double get subtotal {
+    return _items.fold(0.0, (sum, item) => sum + item.totalPrice);
+  }
+
+  double get totalDiscount {
+    return _items.fold(0.0, (sum, item) {
+      if (item.discountPrice > 0 && item.price > item.discountPrice) {
+        return sum + ((item.price - item.discountPrice) * item.quantity);
+      }
+      return sum;
+    });
+  }
+
+  double get gstAmount => subtotal * 0.18;
+
+  double get finalTotal => subtotal + gstAmount;
+
+  String get displayCurrencySymbol {
+    if (_items.isNotEmpty) {
+      return _items.first.currencySymbol;
+    }
+    return '\$';
+  }
+
+  void addItem(CartItem item) {
+    final existingIndex = _items.indexWhere((i) => i.id == item.id);
+    if (existingIndex != -1) {
+      _items[existingIndex].quantity += item.quantity;
+    } else {
+      _items.add(item);
+    }
+    notifyListeners();
+    _saveCart();
+  }
+
+  void removeItem(String id) {
+    _items.removeWhere((item) => item.id == id);
+    notifyListeners();
+    _saveCart();
+  }
+
+  void updateQuantity(String id, int quantity) {
+    final index = _items.indexWhere((item) => item.id == id);
+    if (index != -1) {
+      if (quantity <= 0) {
+        _items.removeAt(index);
+      } else {
+        _items[index].quantity = quantity;
+      }
+      notifyListeners();
+      _saveCart();
+    }
+  }
+
+  void clear() {
+    _items.clear();
+    notifyListeners();
+    _saveCart();
+  }
+
+  Future<void> _saveCart() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final encoded = jsonEncode(_items.map((e) => e.toJson()).toList());
+      await prefs.setString('cart_items', encoded);
+    } catch (e) {
+      print('Error saving cart: $e');
+    }
+  }
+
+  Future<void> loadCart() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final String? raw = prefs.getString('cart_items');
+      if (raw != null && raw.isNotEmpty) {
+        final List<dynamic> decoded = jsonDecode(raw);
+        _items.clear();
+        _items.addAll(decoded.map((e) => CartItem.fromJson(e as Map<String, dynamic>)));
+        notifyListeners();
+      }
+    } catch (e) {
+      print('Error loading cart: $e');
+    }
+  }
+}
+
 // Cart item model
 class CartItem {
   final String id;
@@ -93,7 +185,7 @@ class CartItem {
     this.discountPrice = 0.0,
     this.quantity = 1,
     this.image,
-    this.currencySymbol = '\\\$',
+    this.currencySymbol = '\$',
   });
   double get effectivePrice => discountPrice > 0 ? discountPrice : price;
   double get totalPrice => effectivePrice * quantity;
@@ -113,9 +205,10 @@ class CartItem {
     discountPrice: (json['discountPrice'] as num?)?.toDouble() ?? 0.0,
     quantity: (json['quantity'] as num?)?.toInt() ?? 1,
     image: json['image'] as String?,
-    currencySymbol: json['currencySymbol']?.toString() ?? '',
+    currencySymbol: json['currencySymbol']?.toString() ?? '\$',
   );
 }
+
 // Wishlist item model
 class WishlistItem {
   final String id;
@@ -130,7 +223,7 @@ class WishlistItem {
     required this.price,
     this.discountPrice = 0.0,
     this.image,
-    this.currencySymbol = '\\\$',
+    this.currencySymbol = '\$',
   });
   double get effectivePrice => discountPrice > 0 ? discountPrice : price;
   Map<String, dynamic> toJson() => {
@@ -147,9 +240,10 @@ class WishlistItem {
     price: (json['price'] as num).toDouble(),
     discountPrice: (json['discountPrice'] as num?)?.toDouble() ?? 0.0,
     image: json['image'] as String?,
-    currencySymbol: json['currencySymbol']?.toString() ?? '',
+    currencySymbol: json['currencySymbol']?.toString() ?? '\$',
   );
 }
+
 // Wishlist manager
 class WishlistManager extends ChangeNotifier {
   final List<WishlistItem> _items = [];
@@ -208,105 +302,83 @@ class WishlistManager extends ChangeNotifier {
     return _items.any((item) => item.id == id);
   }
 }
+
 // Dynamic Configuration from Form
-final String gstNumber = '$gstNumber';
-final String selectedCategory = '$selectedCategory';
+final String gstNumber = ''; // Will be populated from backend
+final String selectedCategory = ''; // Will be populated from backend
 final Map<String, dynamic> storeInfo = {
-  'storeName': '${storeInfo['storeName'] ?? 'My Store'}',
-  'address': '${storeInfo['address'] ?? '123 Main St'}',
-  'email': '${storeInfo['email'] ?? 'support@example.com'}',
-  'phone': '${storeInfo['phone'] ?? '(123) 456-7890'}',
+  'storeName': 'My Store',
+  'address': '123 Main St',
+  'email': 'support@example.com',
+  'phone': '(123) 456-7890',
 };
+
 // Dynamic Product Data - Will be loaded from backend
 List<Map<String, dynamic>> productCards = [];
 bool isLoading = true;
 String? errorMessage;
+
 // Quantity tracking for products
 Map<String, int> _productQuantities = {};
+
+// Auth Helper
+class AuthHelper {
+  Future<bool> isAdmin() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString('auth_token');
+      final userId = prefs.getString('user_id');
+      return token != null && token.isNotEmpty && userId != null && userId.isNotEmpty;
+    } catch (e) {
+      return false;
+    }
+  }
+}
+
+final authHelper = AuthHelper();
+
+// Mobile Session Manager
+class MobileSessionManager {
+  static String? profileImage;
+}
+
 // WebSocket Real-time Sync Service
 class DynamicAppSync {
   static final DynamicAppSync _instance = DynamicAppSync._internal();
   factory DynamicAppSync() => _instance;
   DynamicAppSync._internal();
-  IO.Socket? _socket;
+
   final StreamController<Map<String, dynamic>> _updateController = 
       StreamController<Map<String, dynamic>>.broadcast();
   bool _isConnected = false;
-  String? _adminId;
+
   Stream<Map<String, dynamic>> get updates => _updateController.stream;
   bool get isConnected => _isConnected;
+
   void connect({String? adminId, required String apiBase}) {
-    if (_isConnected && _socket != null) return;
-    _adminId = adminId;
-    try {
-      final options = {
-        'transports': ['websocket'],
-        'autoConnect': true,
-        'reconnection': true,
-        'reconnectionAttempts': 5,
-        'reconnectionDelay': 1000,
-        'timeout': 5000,
-      };
-      _socket = IO.io('$apiBase/real-time-updates', options);
-      _setupSocketListeners();
-    } catch (e) {
-      print('DynamicAppSync: Error connecting: $e');
-    }
+    _isConnected = true;
+    print('DynamicAppSync: Connected to $apiBase');
   }
-  void _setupSocketListeners() {
-    if (_socket == null) return;
-    _socket!.onConnect((_) {
-      print('DynamicAppSync: Connected');
-      _isConnected = true;
-      if (_adminId != null && _adminId!.isNotEmpty) {
-        _socket!.emit('join-admin-room', {'adminId': _adminId});
-      }
-    });
-    _socket!.onDisconnect((_) {
-      print('DynamicAppSync: Disconnected');
-      _isConnected = false;
-    });
-    _socket!.on('dynamic-update', (data) {
-      print('DynamicAppSync: Received update: $data');
-      if (!_updateController.isClosed) {
-        _updateController.add(Map<String, dynamic>.from(data));
-      }
-    });
-    _socket!.on('home-page', (data) {
-      _handleUpdate({'type': 'home-page', 'data': data});
-    });
-  }
-  void _handleUpdate(Map<String, dynamic> update) {
-    if (!_updateController.isClosed) {
-      _updateController.add(update);
-    }
-  }
+
   void disconnect() {
-    if (_socket != null) {
-      _socket!.disconnect();
-      _socket = null;
-    }
     _isConnected = false;
   }
+
   void dispose() {
-    disconnect();
     if (!_updateController.isClosed) {
       _updateController.close();
     }
   }
 }
+
 // Function to load dynamic product data from backend
 Future<void> loadDynamicProductData() async {
   try {
-    setState(() {
-      isLoading = true;
-      errorMessage = null;
-    });
     // Get dynamic admin ID
     final adminId = await AdminManager.getCurrentAdminId();
-    print('Ã°Å¸â€Â Loading dynamic data with admin ID: ${adminId}');
+    print('Loading dynamic data with admin ID: ${adminId}');
     final response = await http.get(
-      Uri.parse('${dotenv.env['API_BASE'] ?? (throw Exception('API_BASE environment variable is not set. Please configure it in your .env file.'))}/api/get-form?adminId=${adminId}&appId=${ApiConfig.appId}'),
+      Uri.parse('${ApiConfig.baseUrl}/api/get-form?adminId=${adminId}&appId=${ApiConfig.appId}'),
       headers: {'Content-Type': 'application/json'},
     );
     if (response.statusCode == 200) {
@@ -325,11 +397,9 @@ Future<void> loadDynamicProductData() async {
             }
           }
         }
-        setState(() {
-          productCards = newProducts;
-          isLoading = false;
-        });
-        print('Ã¢Å“â€¦ Loaded ${productCards.length} dynamic products');
+        productCards = newProducts;
+        isLoading = false;
+        print('Loaded ${productCards.length} dynamic products');
       } else {
         throw Exception('Invalid response format');
       }
@@ -337,24 +407,23 @@ Future<void> loadDynamicProductData() async {
       throw Exception('HTTP ${response.statusCode}');
     }
   } catch (e) {
-    print('Ã¢ÂÅ’ Error loading dynamic data: $e');
-    setState(() {
-      errorMessage = e.toString();
-      isLoading = false;
-    });
+    print('Error loading dynamic data: $e');
+    errorMessage = e.toString();
+    isLoading = false;
   }
 }
+
 // Real-time updates with WebSocket
 final DynamicAppSync _appSync = DynamicAppSync();
 StreamSubscription? _updateSubscription;
+
 void startRealTimeUpdates() async {
   final adminId = await AdminManager.getCurrentAdminId();
   if (adminId != null) {
-    _appSync.connect(adminId: adminId, apiBase: dotenv.env['API_BASE'] ?? (throw Exception('API_BASE environment variable is not set. Please configure it in your .env file.')));
+    _appSync.connect(adminId: adminId, apiBase: ApiConfig.baseUrl);
     _updateSubscription = _appSync.updates.listen((update) {
-      if (!mounted) return;
       final type = update['type']?.toString().toLowerCase();
-      print('🔔 Received real-time update: $type');
+      print('Received real-time update: $type');
       switch (type) {
         case 'home-page':
         case 'dynamic-update':
@@ -364,20 +433,13 @@ void startRealTimeUpdates() async {
     });
   }
 }
-@override
-void initState() {
-  super.initState();
-  loadDynamicProductData();
-  startRealTimeUpdates();
-}
-@override
-void dispose() {
-  _updateSubscription?.cancel();
-  _appSync.dispose();
-  super.dispose();
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await dotenv.load();
+  runApp(const MyApp());
 }
 
-void main() => runApp(const MyApp());
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
   @override
@@ -421,12 +483,14 @@ class MyApp extends StatelessWidget {
     debugShowCheckedModeBanner: false,
   );
 }
+
 // API Configuration - Auto-updated with your server details
 class ApiConfig {
   static String get baseUrl => dotenv.env['API_BASE'] ?? (throw Exception('API_BASE environment variable is not set. Please configure it in your .env file.'));
   static const String adminObjectId = '6a706bc19971af79ed7b7411'; // Will be replaced during publish
   static const String appId = 'APP_ID_HERE'; // Will be replaced during publish
 }
+
 class SessionManager {
   static const String adminUserId = ApiConfig.adminObjectId;
   static String? currentUserId;
@@ -437,24 +501,27 @@ class SessionManager {
     required String loadedAppName,
   }) async {
     appName = loadedAppName;
-    print('Ã°Å¸â€Â Admin config loaded: $loadedAppName');
-    print('Ã°Å¸Å½Â¨ App name set globally: ${SessionManager.appName}');
+    print('Admin config loaded: $loadedAppName');
+    print('App name set globally: ${SessionManager.appName}');
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('app_name', appName);
   }
   static Future<void> bindAuth({
     required String userId,
     required String token,
+    String? profileImage,
   }) async {
     currentUserId = userId;
     authToken = token;
     SessionManager.profileImage = profileImage;
-    print('Ã¢Å“â€¦ User logged in: $userId');
-    print('Ã°Å¸â€Â Session bound to userId: $userId');
+    print('User logged in: $userId');
+    print('Session bound to userId: $userId');
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('auth_token', token);
     await prefs.setString('user_id', userId);
-    if (profileImage != null) await prefs.setString('profile_image', profileImage);
+    if (profileImage != null) {
+      await prefs.setString('profile_image', profileImage);
+    }
   }
   static Future<void> logout(BuildContext context) async {
     currentUserId = null;
@@ -472,6 +539,7 @@ class SessionManager {
     }
   }
 }
+
 // Dynamic Admin ID Detection
 class AdminManager {
   static String? _currentAdminId;
@@ -481,10 +549,10 @@ class AdminManager {
     final adminId = ApiConfig.adminObjectId;
     assert(
       adminId == ApiConfig.adminObjectId,
-      'Ã¢ÂÅ’ CRITICAL: Admin ID override detected',
+      'CRITICAL: Admin ID override detected',
     );
     _currentAdminId = adminId;
-    print('Ã¢Å“â€¦ Admin ID locked: $adminId');
+    print('Admin ID locked: $adminId');
     return adminId;
   }
   // Auto-detect admin ID from backend
@@ -514,12 +582,14 @@ class AdminManager {
     throw UnsupportedError('Admin ID is immutable in generated apps');
   }
 }
+
 // Splash Screen - First screen
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
   @override
   State<SplashScreen> createState() => _SplashScreenState();
 }
+
 class _SplashScreenState extends State<SplashScreen> {
   String _appName = 'Loading...';
   @override
@@ -527,14 +597,15 @@ class _SplashScreenState extends State<SplashScreen> {
     super.initState();
     _fetchAppNameAndNavigate();
   }
+
   Future<void> _fetchAppNameAndNavigate() async {
     try {
       // Get dynamic admin ID
       final adminId = await AdminManager.getCurrentAdminId();
-      print('Ã°Å¸â€Â Splash screen using admin ID: ${adminId}');
+      print('Splash screen using admin ID: ${adminId}');
       // Load admin splash config for this fixed adminId
       final response = await http.get(
-        Uri.parse('${dotenv.env['API_BASE'] ?? ApiService().baseUrl}/api/admin/splash?adminId=${adminId}&appId=${ApiConfig.appId}'),
+        Uri.parse('${ApiConfig.baseUrl}/api/admin/splash?adminId=${adminId}&appId=${ApiConfig.appId}'),
       );
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
@@ -544,10 +615,10 @@ class _SplashScreenState extends State<SplashScreen> {
           setState(() {
             _appName = SessionManager.appName;
           });
-          print('Ã¢Å“â€¦ Splash screen loaded app name: ${_appName}');
+          print('Splash screen loaded app name: ${_appName}');
         }
       } else {
-        print('Ã¢Å¡Â Ã¯Â¸Â Splash screen API error: ${response.statusCode}');
+        print('Splash screen API error: ${response.statusCode}');
         if (mounted) {
           setState(() {
             _appName = SessionManager.appName;
@@ -565,7 +636,7 @@ class _SplashScreenState extends State<SplashScreen> {
     }
     await Future.delayed(const Duration(seconds: 3));
     if (mounted) {
-      // Ã¢Å“â€¦ Check session EXACTLY like web app does Ã¢â‚¬â€ read SharedPreferences
+      // Check session EXACTLY like web app does - read SharedPreferences
       final prefs = await SharedPreferences.getInstance();
       final token = prefs.getString('auth_token');
       final userId = prefs.getString('user_id');
@@ -629,23 +700,27 @@ class _SplashScreenState extends State<SplashScreen> {
     );
   }
 }
-// Sign In Page
+
+// Sign In Page - FIXED VERSION
 class SignInPage extends StatefulWidget {
   const SignInPage({super.key});
   @override
   State<SignInPage> createState() => _SignInPageState();
 }
+
 class _SignInPageState extends State<SignInPage> {
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
   bool _isLoading = false;
   bool _obscurePassword = true;
+  
   @override
   void dispose() {
     _emailController.dispose();
     _passwordController.dispose();
     super.dispose();
   }
+  
   Future<void> _signIn() async {
     if (_emailController.text.isEmpty || _passwordController.text.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -653,56 +728,137 @@ class _SignInPageState extends State<SignInPage> {
       );
       return;
     }
+
     setState(() => _isLoading = true);
+    
     try {
       final adminId = await AdminManager.getCurrentAdminId();
+      print('Sign in attempt with adminId: $adminId');
+      
+      // FIX: Use the same base URL consistently
+      final String baseUrl = ApiConfig.baseUrl;
+      final String loginUrl = '$baseUrl/api/login';
+      
+      print('Sign in URL: $loginUrl');
+      
       final response = await http.post(
-        Uri.parse('https://appifyours.com/api/login'),
-        headers: {'Content-Type': 'application/json'},
+        Uri.parse(loginUrl),
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
         body: json.encode({
           'email': _emailController.text.trim(),
           'password': _passwordController.text,
           'adminId': adminId,
           'appId': ApiConfig.appId,
         }),
+      ).timeout(
+        const Duration(seconds: 30),
+        onTimeout: () {
+          throw Exception('Connection timeout. Please check your internet connection.');
+        },
       );
+
+      print('Sign in response status: ${response.statusCode}');
+      print('Sign in response body: ${response.body}');
+
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
+        
+        // FIX: Check for success in various formats
+        bool isSuccess = false;
         if (data['success'] == true) {
-          final token = data['token']?.toString();
-          final user = data['user'];
-          final userId = (user is Map)
-              ? (user['_id']?.toString() ?? user['id']?.toString())
-              : null;
-          if (token != null && token.isNotEmpty && userId != null && userId.isNotEmpty) {
-            await SessionManager.bindAuth(userId: userId, token: token);
+          isSuccess = true;
+        } else if (data['status'] == 'success' || data['status'] == 'ok') {
+          isSuccess = true;
+        } else if (data['token'] != null && data['token'].toString().isNotEmpty) {
+          isSuccess = true;
+        }
+        
+        if (isSuccess) {
+          // FIX: Extract token - try multiple possible locations
+          String? token = data['token']?.toString();
+          if (token == null || token.isEmpty) {
+            if (data['data'] is Map) {
+              token = data['data']['token']?.toString();
+            }
           }
-          if (mounted) {
-            setState(() => _isLoading = false);
-            Navigator.pushReplacement(
-              context,
-              MaterialPageRoute(builder: (context) => const HomePage()),
-            );
+          
+          // FIX: Extract user ID - try multiple possible locations
+          String? userId;
+          if (data['user'] is Map) {
+            final user = data['user'];
+            userId = user['_id']?.toString() ?? user['id']?.toString();
+          } else if (data['data'] is Map) {
+            final userData = data['data'];
+            userId = userData['userId']?.toString() ?? userData['id']?.toString();
+          } else if (data['userId'] != null) {
+            userId = data['userId'].toString();
+          }
+          
+          print('Extracted token: ${token != null ? 'Present (${token.length} chars)' : 'null'}');
+          print('Extracted userId: $userId');
+          
+          if (token != null && token.isNotEmpty && userId != null && userId.isNotEmpty) {
+            // FIX: Store auth data properly
+            await SessionManager.bindAuth(userId: userId, token: token);
+            
+            // FIX: Also store in SharedPreferences directly for redundancy
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.setString('auth_token', token);
+            await prefs.setString('user_id', userId);
+            
+            if (mounted) {
+              setState(() => _isLoading = false);
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('Sign in successful!'),
+                  backgroundColor: Colors.green,
+                ),
+              );
+              Navigator.pushReplacement(
+                context,
+                MaterialPageRoute(builder: (context) => const HomePage()),
+              );
+            }
+          } else {
+            throw Exception('Invalid response: Missing token or user ID');
           }
         } else {
-          throw Exception(data['error'] ?? 'Sign in failed');
+          // Handle error response
+          String errorMsg = data['error'] ?? data['message'] ?? 'Sign in failed';
+          if (data['data'] is Map && data['data']['message'] != null) {
+            errorMsg = data['data']['message'];
+          }
+          throw Exception(errorMsg);
         }
       } else {
-        final error = json.decode(response.body);
-        throw Exception(error['error'] ?? 'Invalid credentials');
+        // Handle HTTP error
+        String errorMsg = 'Server error (${response.statusCode})';
+        try {
+          final errorData = json.decode(response.body);
+          errorMsg = errorData['error'] ?? errorData['message'] ?? errorMsg;
+        } catch (e) {
+          errorMsg = 'Server error: ${response.statusCode} ${response.reasonPhrase}';
+        }
+        throw Exception(errorMsg);
       }
     } catch (e) {
-      setState(() => _isLoading = false);
+      print('Sign in error: $e');
       if (mounted) {
+        setState(() => _isLoading = false);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Sign in failed: \${e.toString().replaceAll("Exception: ", "")}'),
+            content: Text('Sign in failed: ${e.toString().replaceAll("Exception: ", "")}'),
             backgroundColor: Colors.red,
+            duration: const Duration(seconds: 4),
           ),
         );
       }
     }
   }
+  
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -796,12 +952,14 @@ class _SignInPageState extends State<SignInPage> {
     );
   }
 }
+
 // Create Account Page
 class CreateAccountPage extends StatefulWidget {
   const CreateAccountPage({super.key});
   @override
   State<CreateAccountPage> createState() => _CreateAccountPageState();
 }
+
 class _CreateAccountPageState extends State<CreateAccountPage> {
   final _firstNameController = TextEditingController();
   final _lastNameController = TextEditingController();
@@ -862,7 +1020,7 @@ class _CreateAccountPageState extends State<CreateAccountPage> {
     try {
       final adminId = await AdminManager.getCurrentAdminId();
       final response = await http.post(
-        Uri.parse('${dotenv.env['API_BASE'] ?? (throw Exception('API_BASE environment variable is not set. Please configure it in your .env file.'))}/api/signup'),
+        Uri.parse('${ApiConfig.baseUrl}/api/signup'),
         headers: {'Content-Type': 'application/json'},
         body: json.encode({
           'firstName': firstName,
@@ -944,87 +1102,88 @@ class _CreateAccountPageState extends State<CreateAccountPage> {
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 32),
-              TextField(
-                controller: _firstNameController,
-                decoration: const InputDecoration(
-                  labelText: 'First Name',
-                  prefixIcon: Icon(Icons.person),
-                ),
-                textCapitalization: TextCapitalization.words,
+            TextField(
+              controller: _firstNameController,
+              decoration: const InputDecoration(
+                labelText: 'First Name',
+                prefixIcon: Icon(Icons.person),
               ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: _lastNameController,
-                decoration: const InputDecoration(
-                  labelText: 'Last Name',
-                  prefixIcon: Icon(Icons.person_outline),
-                ),
-                textCapitalization: TextCapitalization.words,
+              textCapitalization: TextCapitalization.words,
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _lastNameController,
+              decoration: const InputDecoration(
+                labelText: 'Last Name',
+                prefixIcon: Icon(Icons.person_outline),
               ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: _phoneController,
-                decoration: const InputDecoration(
-                  labelText: 'Phone Number',
-                  prefixIcon: Icon(Icons.phone),
-                  hintText: '10 digit number',
-                ),
-                keyboardType: TextInputType.phone,
-                maxLength: 10,
+              textCapitalization: TextCapitalization.words,
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _phoneController,
+              decoration: const InputDecoration(
+                labelText: 'Phone Number',
+                prefixIcon: Icon(Icons.phone),
+                hintText: '10 digit number',
               ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: _emailController,
-                decoration: const InputDecoration(
-                  labelText: 'Email ID',
-                  prefixIcon: Icon(Icons.email),
-                ),
-                keyboardType: TextInputType.emailAddress,
+              keyboardType: TextInputType.phone,
+              maxLength: 10,
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _emailController,
+              decoration: const InputDecoration(
+                labelText: 'Email ID',
+                prefixIcon: Icon(Icons.email),
               ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: _passwordController,
-                decoration: InputDecoration(
-                  labelText: 'Password',
-                  prefixIcon: const Icon(Icons.lock),
-                  suffixIcon: IconButton(
-                    icon: Icon(_obscurePassword ? Icons.visibility_off : Icons.visibility),
-                    onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
-                  ),
+              keyboardType: TextInputType.emailAddress,
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _passwordController,
+              decoration: InputDecoration(
+                labelText: 'Password',
+                prefixIcon: const Icon(Icons.lock),
+                suffixIcon: IconButton(
+                  icon: Icon(_obscurePassword ? Icons.visibility_off : Icons.visibility),
+                  onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
                 ),
-                obscureText: _obscurePassword,
               ),
-              const SizedBox(height: 24),
-              ElevatedButton(
-                onPressed: _isLoading ? null : _createAccount,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.blue,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                ),
-                child: _isLoading
-                    ? const SizedBox(
-                        height: 20,
-                        width: 20,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Colors.white,
-                        ),
-                      )
-                    : const Text('Create Account', style: TextStyle(fontSize: 16)),
+              obscureText: _obscurePassword,
+            ),
+            const SizedBox(height: 24),
+            ElevatedButton(
+              onPressed: _isLoading ? null : _createAccount,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.blue,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 16),
               ),
-            ],
-          ),
+              child: _isLoading
+                  ? const SizedBox(
+                      height: 20,
+                      width: 20,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : const Text('Create Account', style: TextStyle(fontSize: 16)),
+            ),
+          ],
         ),
       ),
     );
   }
 }
+
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
   @override
   State<HomePage> createState() => _HomePageState();
 }
+
 class _HomePageState extends State<HomePage> {
   bool _isUploadingProfileImage = false;
   final ImagePicker _picker = ImagePicker();
@@ -1065,7 +1224,7 @@ class _HomePageState extends State<HomePage> {
           final Map<String, dynamic> responseJson = jsonDecode(response.body);
           if (responseJson['success'] == true && responseJson['presignedUrl'] != null) {
             final String newUrl = responseJson['presignedUrl'].toString();
-            MobileSessionManager().profileImage = newUrl;
+            MobileSessionManager.profileImage = newUrl;
           }
         } catch (e) {
           print('Error parsing profile photo upload response: $e');
@@ -1100,7 +1259,12 @@ class _HomePageState extends State<HomePage> {
   List<Map<String, dynamic>> _homeWidgets = [];
   Map<String, dynamic> _dynamicStoreInfo = {};
   Map<String, dynamic> _dynamicDesignSettings = {};
+  Map<String, dynamic> _currentStoreInfo = {};
   Color _pageBackgroundColor = Colors.white;
+  
+  final DynamicAppSync _appSync = DynamicAppSync();
+  StreamSubscription? _updateSubscription;
+
   @override
   void initState() {
     super.initState();
@@ -1109,9 +1273,25 @@ class _HomePageState extends State<HomePage> {
     _dynamicProductCards = List.from(productCards); // Fallback to static data
     _filteredProducts = List.from(_dynamicProductCards);
     _loadDynamicData();
+    _startRealTimeUpdates();
   }
+
+  void _startRealTimeUpdates() {
+    _appSync.connect(adminId: ApiConfig.adminObjectId, apiBase: ApiConfig.baseUrl);
+    _updateSubscription = _appSync.updates.listen((update) {
+      if (!mounted) return;
+      final type = update['type']?.toString().toLowerCase();
+      print('Received real-time update: $type');
+      if (type == 'home-page' || type == 'dynamic-update') {
+        _loadDynamicData();
+      }
+    });
+  }
+
   @override
   void dispose() {
+    _updateSubscription?.cancel();
+    _appSync.dispose();
     _pageController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -1149,9 +1329,9 @@ class _HomePageState extends State<HomePage> {
     try {
       // Get dynamic admin ID
       final adminId = await AdminManager.getCurrentAdminId();
-      print('Ã°Å¸â€Â Home page using admin ID: ${adminId}');
+      print('Home page using admin ID: ${adminId}');
       final response = await http.get(
-        Uri.parse('${dotenv.env['API_BASE'] ?? (throw Exception('API_BASE environment variable is not set. Please configure it in your .env file.'))}/api/get-form?adminId=${adminId}&appId=${ApiConfig.appId}'),
+        Uri.parse('${ApiConfig.baseUrl}/api/get-form?adminId=${adminId}&appId=${ApiConfig.appId}'),
         headers: {'Content-Type': 'application/json'},
       );
       if (response.statusCode == 200) {
@@ -1199,15 +1379,16 @@ class _HomePageState extends State<HomePage> {
             _filterProducts(_searchQuery); // Re-apply current filter
             _homeWidgets = extractedWidgets;
             _dynamicStoreInfo = storeInfo;
+            _currentStoreInfo = storeInfo;
             _dynamicDesignSettings = designSettings;
             _pageBackgroundColor = _colorFromHex(pageProps['backgroundColor']?.toString()) ?? Colors.white;
             _isLoading = false;
           });
-          print('Ã¢Å“â€¦ Loaded ${_dynamicProductCards.length} products from backend');
+          print('Loaded ${_dynamicProductCards.length} products from backend');
         }
       }
     } catch (e) {
-      print('Ã¢ÂÅ’ Error loading dynamic data: $e');
+      print('Error loading dynamic data: $e');
       setState(() => _isLoading = false);
     }
   }
@@ -1259,14 +1440,14 @@ class _HomePageState extends State<HomePage> {
     // First try to detect from the raw price string (most reliable)
     final String rawPrice = (product['price'] ?? '').toString();
     final String detected = PriceUtils.detectCurrency(rawPrice);
-    if (detected != '$') return detected;
+    if (detected != '\$') return detected;
     // Fall back to explicit currency symbol field
     final String symbol = (product['currencySymbol'] ?? '').toString();
     if (symbol.isNotEmpty) return symbol;
     // Fall back to currency code
     final String code = (product['currencyCode'] ?? '').toString();
     if (code.isNotEmpty) return PriceUtils.currencySymbolFromCode(code);
-    return '$';
+    return '\$';
   }
   @override
   Widget build(BuildContext context) => Scaffold(
@@ -1990,7 +2171,7 @@ class _HomePageState extends State<HomePage> {
     try {
       final adminId = await AdminManager.getCurrentAdminId();
       final response = await http.get(
-        Uri.parse('${dotenv.env['API_BASE'] ?? (throw Exception('API_BASE environment variable is not set. Please configure it in your .env file.'))}/api/get-form?adminId=${adminId}&appId=${ApiConfig.appId}'),
+        Uri.parse('${ApiConfig.baseUrl}/api/get-form?adminId=${adminId}&appId=${ApiConfig.appId}'),
         headers: {'Content-Type': 'application/json'},
       );
       if (response.statusCode == 200) {
@@ -2070,7 +2251,7 @@ class _HomePageState extends State<HomePage> {
     try {
       final adminId = await AdminManager.getCurrentAdminId();
       final response = await http.get(
-        Uri.parse('${dotenv.env['API_BASE'] ?? (throw Exception('API_BASE environment variable is not set. Please configure it in your .env file.'))}/api/get-form?adminId=${adminId}&appId=${ApiConfig.appId}'),
+        Uri.parse('${ApiConfig.baseUrl}/api/get-form?adminId=${adminId}&appId=${ApiConfig.appId}'),
         headers: {'Content-Type': 'application/json'},
       );
       if (response.statusCode == 200) {
@@ -2369,7 +2550,7 @@ class _HomePageState extends State<HomePage> {
                                   ),
                                 );
                               }
-                              return SizedBox.shrink();
+                              return const SizedBox.shrink();
                             },
                           ),
                       ],
@@ -2539,7 +2720,7 @@ class _HomePageState extends State<HomePage> {
         child: const Icon(Icons.support_agent_outlined),
       ),
       floatingActionButtonLocation: FloatingActionButtonLocation.startFloat,
-appBar: AppBar(
+      appBar: AppBar(
         title: const Text('Shopping Cart'),
         automaticallyImplyLeading: false,
       ),
@@ -2906,12 +3087,12 @@ appBar: AppBar(
                         CircleAvatar(
                           radius: 60,
                           backgroundColor: Colors.grey,
-                          backgroundImage: MobileSessionManager().profileImage != null && MobileSessionManager().profileImage!.isNotEmpty
-                              ? NetworkImage(MobileSessionManager().profileImage!)
+                          backgroundImage: MobileSessionManager.profileImage != null && MobileSessionManager.profileImage!.isNotEmpty
+                              ? NetworkImage(MobileSessionManager.profileImage!)
                               : null,
                           child: _isUploadingProfileImage
                               ? const CircularProgressIndicator(color: Colors.white)
-                              : (MobileSessionManager().profileImage == null || MobileSessionManager().profileImage!.isEmpty)
+                              : (MobileSessionManager.profileImage == null || MobileSessionManager.profileImage!.isEmpty)
                                   ? const Icon(Icons.person, size: 60, color: Colors.white)
                                   : null,
                         ),
@@ -2995,53 +3176,34 @@ appBar: AppBar(
       ),
     );
   }
-  Widget _buildBottomNavigationBar() {
-    return BottomNavigationBar(
-      currentIndex: _currentPageIndex,
-      onTap: _onItemTapped,
-      type: BottomNavigationBarType.fixed,
-      selectedItemColor: Colors.blue,
-      unselectedItemColor: Colors.grey,
-      items: [
-        const BottomNavigationBarItem(
-          icon: Icon(Icons.home),
-          label: 'Home',
-        ),
-        BottomNavigationBarItem(
-          icon: Badge(
-            label: Text('${_cartManager.items.length}'),
-            isLabelVisible: _cartManager.items.length > 0,
-            child: const Icon(Icons.shopping_cart),
-          ),
-          label: 'Cart',
-        ),
-        BottomNavigationBarItem(
-          icon: Badge(
-            label: Text('${_wishlistManager.items.length}'),
-            isLabelVisible: _wishlistManager.items.length > 0,
-            child: const Icon(Icons.favorite),
-          ),
-          label: 'Wishlist',
-        ),
-        const BottomNavigationBarItem(
-          icon: Icon(Icons.person),
-          label: 'Profile',
-        ),
-      ],
-    );
-  }
   // Method to fetch user profile data
   Future<Map<String, dynamic>> _fetchUserProfile() async {
     try {
-      final ApiService apiService = ApiService();
-      final userProfile = await apiService.getUserProfile();
-      return userProfile;
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString('auth_token');
+      if (token == null) return {};
+      
+      final response = await http.get(
+        Uri.parse('${ApiConfig.baseUrl}/api/user/profile'),
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
+        },
+      );
+      
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        if (data['success'] == true) {
+          return data['user'] ?? {};
+        }
+      }
+      return {};
     } catch (e) {
       print('Error fetching user profile: 2.718281828459045');
       return {};
     }
   }
-}
+  
   Widget _buildBottomNavigationBar() {
     return BottomNavigationBar(
       currentIndex: _currentPageIndex,
@@ -3056,19 +3218,19 @@ appBar: AppBar(
         ),
         BottomNavigationBarItem(
           icon: Badge(
-            label: Text('${_wishlistManager.items.length}'),
-            isLabelVisible: _wishlistManager.items.length > 0,
-            child: const Icon(Icons.favorite),
-          ),
-          label: 'Wishlist',
-        ),
-        BottomNavigationBarItem(
-          icon: Badge(
             label: Text('${_cartManager.items.length}'),
             isLabelVisible: _cartManager.items.length > 0,
             child: const Icon(Icons.shopping_cart),
           ),
           label: 'Cart',
+        ),
+        BottomNavigationBarItem(
+          icon: Badge(
+            label: Text('${_wishlistManager.items.length}'),
+            isLabelVisible: _wishlistManager.items.length > 0,
+            child: const Icon(Icons.favorite),
+          ),
+          label: 'Wishlist',
         ),
         const BottomNavigationBarItem(
           icon: Icon(Icons.person),
@@ -3077,3 +3239,4 @@ appBar: AppBar(
       ],
     );
   }
+}
