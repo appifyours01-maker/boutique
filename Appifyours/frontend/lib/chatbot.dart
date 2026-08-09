@@ -1,175 +1,10 @@
 import 'package:flutter/material.dart';
+
+import 'services/api_service.dart';
+import 'services/gemini_service.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
-import 'package:appifyours/services/api_service.dart';
-// Import from main.dart instead of services
 import 'main.dart';
-
-// Gemini Service - Local implementation
-class GeminiService {
-  List<Map<String, dynamic>> _products = [];
-  Map<String, dynamic> _storeInfo = {};
-  Map<String, dynamic> _businessDetails = {};
-
-  void updateProducts(List<Map<String, dynamic>> products) {
-    _products = products;
-  }
-
-  void updateStoreInfo(Map<String, dynamic> storeInfo) {
-    _storeInfo = storeInfo;
-  }
-
-  void updateBusinessDetails(Map<String, dynamic> businessDetails) {
-    _businessDetails = businessDetails;
-  }
-
-  Future<String> sendMessage(String userMessage) async {
-    try {
-      // If we have the Gemini API key, use it
-      final apiKey = await _getGeminiApiKey();
-      
-      if (apiKey != null && apiKey.isNotEmpty) {
-        return await _sendToGemini(userMessage, apiKey);
-      } else {
-        // Fallback to local response
-        return _generateLocalResponse(userMessage);
-      }
-    } catch (e) {
-      print('Error sending message: $e');
-      return _generateLocalResponse(userMessage);
-    }
-  }
-
-  Future<String?> _getGeminiApiKey() async {
-    // Try to get from business details or environment
-    return _businessDetails['geminiApiKey'];
-  }
-
-  Future<String> _sendToGemini(String userMessage, String apiKey) async {
-    try {
-      final response = await http.post(
-        Uri.parse('https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=$apiKey'),
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: json.encode({
-          'contents': [
-            {
-              'parts': [
-                {'text': _buildPrompt(userMessage)}
-              ]
-            }
-          ]
-        }),
-      );
-
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        final text = data['candidates']?[0]?['content']?['parts']?[0]?['text'];
-        if (text != null) {
-          return text;
-        }
-      }
-      return _generateLocalResponse(userMessage);
-    } catch (e) {
-      print('Gemini API error: $e');
-      return _generateLocalResponse(userMessage);
-    }
-  }
-
-  String _buildPrompt(String userMessage) {
-    String productsInfo = '';
-    if (_products.isNotEmpty) {
-      productsInfo = 'Products available:\n';
-      for (final product in _products.take(20)) {
-        final name = product['productName'] ?? 'Unknown';
-        final price = product['price'] ?? 'N/A';
-        final discount = product['discountPrice'] ?? '';
-        final stock = product['quantity'] ?? 'N/A';
-        productsInfo += '- $name: Price: $price';
-        if (discount.toString().isNotEmpty) {
-          productsInfo += ' (Discounted: $discount)';
-        }
-        productsInfo += ', Stock: $stock\n';
-      }
-    }
-
-    String storeInfo = '';
-    if (_storeInfo.isNotEmpty) {
-      storeInfo = 'Store Information:\n';
-      if (_storeInfo['storeName'] != null) storeInfo += 'Name: ${_storeInfo['storeName']}\n';
-      if (_storeInfo['address'] != null) storeInfo += 'Address: ${_storeInfo['address']}\n';
-      if (_storeInfo['email'] != null) storeInfo += 'Email: ${_storeInfo['email']}\n';
-      if (_storeInfo['phone'] != null) storeInfo += 'Phone: ${_storeInfo['phone']}\n';
-    }
-
-    return '''
-You are a helpful customer support assistant for a store called "${_storeInfo['storeName'] ?? 'My Store'}".
-
-$storeInfo
-$productsInfo
-
-Customer question: $userMessage
-
-Please provide a helpful, concise response based on the above information. If the customer asks about products, refer to the product list. If they ask about store details, refer to the store information. If they ask about something not in the data, politely say you don't have that information.
-''';
-  }
-
-  String _generateLocalResponse(String userMessage) {
-    final lowerMessage = userMessage.toLowerCase();
-
-    // Check for product count
-    if (lowerMessage.contains('how many') || lowerMessage.contains('count')) {
-      if (_products.isNotEmpty) {
-        return 'We currently have ${_products.length} products available in our store. Would you like me to list them?';
-      } else {
-        return "I'm sorry, but I don't have information about our product count at the moment. Please check back later.";
-      }
-    }
-
-    // Check for product availability
-    if (lowerMessage.contains('available') || lowerMessage.contains('in stock') || lowerMessage.contains('stock')) {
-      if (_products.isNotEmpty) {
-        final inStock = _products.where((p) {
-          final qty = p['quantity'] ?? 0;
-          // FIXED: Use > 0 instead of isPositive
-          return int.tryParse(qty.toString()) != null && int.tryParse(qty.toString())! > 0;
-        });
-        if (inStock.isNotEmpty) {
-          return 'We have ${inStock.length} products in stock. Here are some: ${inStock.take(5).map((p) => p['productName'] ?? 'Product').join(', ')}... Would you like more details about any specific product?';
-        } else {
-          return 'I apologize, but it appears we are currently out of stock. Please check back later.';
-        }
-      }
-      return "I'm sorry, but I don't have stock information at the moment.";
-    }
-
-    // Check for product listing
-    if (lowerMessage.contains('product') || lowerMessage.contains('list') || lowerMessage.contains('show')) {
-      if (_products.isNotEmpty) {
-        final names = _products.take(10).map((p) => p['productName'] ?? 'Product').join(', ');
-        return 'Here are our available products: $names${_products.length > 10 ? ' and ${_products.length - 10} more' : ''}. Would you like to know more about any specific product?';
-      }
-      return "I'm sorry, but I don't have product information at the moment.";
-    }
-
-    // Check for store info
-    if (lowerMessage.contains('store') || lowerMessage.contains('shop') || lowerMessage.contains('about')) {
-      final name = _storeInfo['storeName'] ?? 'our store';
-      final address = _storeInfo['address'] ?? '';
-      final phone = _storeInfo['phone'] ?? '';
-      final email = _storeInfo['email'] ?? '';
-      
-      if (name.isNotEmpty || address.isNotEmpty || phone.isNotEmpty || email.isNotEmpty) {
-        return 'Store Information:\n$name\n${address.isNotEmpty ? 'Address: $address\n' : ''}${phone.isNotEmpty ? 'Phone: $phone\n' : ''}${email.isNotEmpty ? 'Email: $email' : ''}';
-      }
-      return "I'm here to help with any questions about our store!";
-    }
-
-    // Default response
-    return "Thank you for your question! I'm here to help with product information, stock availability, pricing, and store details. Could you please be more specific about what you'd like to know?";
-  }
-}
 
 class ChatBotPage extends StatefulWidget {
   final String shopName;
@@ -209,8 +44,7 @@ class _ChatBotPageState extends State<ChatBotPage> {
   Future<void> _init() async {
     bool premium = false;
     try {
-      final apiService = ApiService();
-      premium = await apiService.hasActiveSubscription();
+      premium = await ApiService().hasActiveSubscription();
     } catch (_) {
       premium = false;
     }
@@ -242,9 +76,10 @@ class _ChatBotPageState extends State<ChatBotPage> {
     try {
       setState(() => _isLoadingData = true);
 
+      // Fetch product data from backend using same API as main.dart
       final adminId = await AdminManager.getCurrentAdminId();
-      print('🔍 Chatbot using admin ID: $adminId');
-      print('🌐 API URL: ${ApiConfig.baseUrl}/api/get-form?adminId=$adminId&appId=${ApiConfig.appId}');
+      print('🔍 Chatbot using admin ID: ${adminId}');
+      print('🌐 API URL: ${ApiConfig.baseUrl}/api/get-form?adminId=${adminId}&appId=${ApiConfig.appId}');
 
       final response = await http.get(
         Uri.parse('${ApiConfig.baseUrl}/api/get-form?adminId=$adminId&appId=${ApiConfig.appId}'),
@@ -264,18 +99,21 @@ class _ChatBotPageState extends State<ChatBotPage> {
         if (data['success'] == true) {
           final pages = (data['pages'] is List) ? List.from(data['pages']) : <dynamic>[];
 
+          // Extract products from widgets
           if (pages.isNotEmpty && pages.first is Map && (pages.first as Map)['widgets'] is List) {
             final widgets = List<Map<String, dynamic>>.from((pages.first as Map)['widgets']);
             for (final w in widgets) {
               final name = (w['name'] ?? '').toString();
               final props = w['properties'];
               
+              // Extract products
               if (name == 'ProductGridWidget' || name == 'Catalog View Card' || name == 'Product Detail Card') {
                 if (props is Map && props['productCards'] is List) {
                   extractedProducts.addAll(List<Map<String, dynamic>>.from(props['productCards']));
                 }
               }
               
+              // Extract store info from StoreInfoWidget properties (like main.dart does)
               if (name == 'StoreInfoWidget' && props is Map) {
                 if (props['storeName'] != null) storeInfoData['storeName'] = props['storeName'];
                 if (props['address'] != null) storeInfoData['address'] = props['address'];
@@ -287,16 +125,21 @@ class _ChatBotPageState extends State<ChatBotPage> {
             }
           }
 
+          // Extract store info from API response - same as main.dart
           final apiStoreInfo = (data['storeInfo'] is Map) 
               ? Map<String, dynamic>.from(data['storeInfo']) 
               : <String, dynamic>{};
           
+          // Merge widget store info with API store info (widget takes priority like main.dart)
           if (storeInfoData.isNotEmpty) {
+            // Widget properties found, use them
             print('✅ Using store info from widget properties');
           } else if (apiStoreInfo.isNotEmpty) {
+            // Use API storeInfo if no widget properties found
             storeInfoData = apiStoreInfo;
             print('✅ Using store info from API storeInfo field');
           } else {
+            // Fallback to top-level fields
             storeInfoData = {
               'storeName': data['shopName'] ?? data['appName'],
               'shopName': data['shopName'] ?? data['appName'],
@@ -315,6 +158,7 @@ class _ChatBotPageState extends State<ChatBotPage> {
         print('Response body: ${response.body}');
       }
 
+      // Fetch business details separately
       try {
         final apiService = ApiService();
         businessDetails = await apiService.getBusinessDetails() ?? {};
@@ -330,6 +174,7 @@ class _ChatBotPageState extends State<ChatBotPage> {
           _isLoadingData = false;
         });
 
+        // Update Gemini service with all data
         _geminiService.updateProducts(_products);
         _geminiService.updateStoreInfo(_storeInfo);
         _geminiService.updateBusinessDetails(businessDetails);
@@ -376,6 +221,7 @@ class _ChatBotPageState extends State<ChatBotPage> {
     _scrollToBottom();
 
     try {
+      // Get response from Gemini AI
       final reply = await _geminiService.sendMessage(trimmed);
       
       if (!mounted) return;
@@ -427,6 +273,35 @@ class _ChatBotPageState extends State<ChatBotPage> {
     );
   }
 
+  Widget _buildPremiumRequired(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const SizedBox(height: 24),
+          const Icon(Icons.lock_outline, size: 56),
+          const SizedBox(height: 16),
+          const Text(
+            'Chatbot is a Premium feature',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Upgrade your plan to enable chatbot for ${widget.shopName}.',
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 16),
+          ElevatedButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildChat(BuildContext context) {
     return Column(
       children: [
@@ -436,6 +311,7 @@ class _ChatBotPageState extends State<ChatBotPage> {
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
             itemCount: _messages.length + (_isSendingMessage ? 1 : 0),
             itemBuilder: (context, index) {
+              // Show typing indicator when sending message
               if (index == _messages.length && _isSendingMessage) {
                 return Align(
                   alignment: Alignment.centerLeft,
