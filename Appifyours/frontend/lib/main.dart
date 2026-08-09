@@ -103,11 +103,13 @@ class CartManager extends ChangeNotifier {
   }
 
   double get totalDiscount {
-    return _items.fold(0.0, (sum, item) => 
-      (item.discountPrice > 0 && item.discountPrice < item.price)
-        ? sum + (item.price - item.discountPrice) * item.quantity
-        : sum + 0.0
-    );
+    double discount = 0.0;
+    for (var item in _items) {
+      if (item.discountPrice > 0 && item.discountPrice < item.price) {
+        discount += (item.price - item.discountPrice) * item.quantity;
+      }
+    }
+    return discount;
   }
 
   double get gstAmount {
@@ -451,10 +453,10 @@ class MyApp extends StatelessWidget {
         backgroundColor: Colors.blue,
         foregroundColor: Colors.white,
       ),
-      cardTheme: const CardThemeData(
+      cardTheme: CardTheme(
         elevation: 4,
         shadowColor: Colors.black12,
-        shape: RoundedRectangleBorder(
+        shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.all(Radius.circular(12)),
         ),
       ),
