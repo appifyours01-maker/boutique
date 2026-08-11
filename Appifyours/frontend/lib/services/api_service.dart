@@ -1036,6 +1036,42 @@ class ApiService {
     }
   }
 
+  // Get all customer orders for an admin's shop (uses logged-in user's ID as adminId)
+  Future<List<Map<String, dynamic>>> getAdminOrders() async {
+    try {
+      final userId = await _getUserId();
+      print('Fetching customer orders for Admin ID: $userId');
+
+      if (userId == null) {
+        throw Exception('No user ID found. Please log in again.');
+      }
+
+      final response = await get('/api/get-admin-orders/$userId');
+
+      print('Admin Orders response status: ${response.statusCode}');
+
+      if (response.statusCode == 200) {
+        final Map<String, dynamic> data = json.decode(response.body);
+        if (data['success'] == true && data['data'] is List) {
+          final List<dynamic> orders = data['data'];
+          return orders.map<Map<String, dynamic>>((item) {
+            return Map<String, dynamic>.from(item);
+          }).toList();
+        } else {
+          return [];
+        }
+      } else if (response.statusCode == 404) {
+        return [];
+      } else {
+        final error = json.decode(response.body);
+        throw Exception(error['message'] ?? 'Failed to load customer orders');
+      }
+    } catch (e) {
+      print('Exception in getAdminOrders: $e');
+      throw Exception('Failed to load customer orders: $e');
+    }
+  }
+
 
 // Submit support request
   Future<Map<String, dynamic>> submitSupport({
