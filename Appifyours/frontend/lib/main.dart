@@ -492,7 +492,7 @@ class AdminManager {
   static Future<String?> _autoDetectAdminId() async {
     try {
       final response = await http.get(
-        Uri.parse('http://192.168.0.4:5000/api/admin/app-info'),
+        Uri.parse('http://192.168.0.6:5000/api/admin/app-info'),
         headers: {'Content-Type': 'application/json'},
       );
       if (response.statusCode == 200) {
@@ -658,7 +658,7 @@ class _SignInPageState extends State<SignInPage> {
     try {
       final adminId = await AdminManager.getCurrentAdminId();
       final response = await http.post(
-        Uri.parse('http://192.168.0.4:5000/api/login'),
+        Uri.parse('http://192.168.0.6:5000/api/login'),
         headers: {'Content-Type': 'application/json'},
         body: json.encode({
           'email': _emailController.text.trim(),
